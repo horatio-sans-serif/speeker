@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy.io import wavfile
 
+from .preprocessing import preprocess_for_tts
 from .voices import (
     DEFAULT_ENGINE,
     get_default_voice,
@@ -165,14 +166,33 @@ def save_audio(audio: np.ndarray, sample_rate: int, text: str) -> Path:
 
 
 def is_player_running() -> bool:
-    """Check if the speeker player is already running."""
+    """Check if the speeker player is already running (excludes zombie processes)."""
     try:
+        # Get PIDs matching speeker-player
         result = subprocess.run(
             ["pgrep", "-f", "speeker-player"],
             capture_output=True,
             text=True,
         )
-        return result.returncode == 0
+        if result.returncode != 0:
+            return False
+
+        # Check each PID to see if it's actually running (not zombie)
+        for pid in result.stdout.strip().split('\n'):
+            if not pid:
+                continue
+            # Check process state via ps
+            ps_result = subprocess.run(
+                ["ps", "-o", "state=", "-p", pid],
+                capture_output=True,
+                text=True,
+            )
+            state = ps_result.stdout.strip()
+            # Z = zombie, skip those
+            if state and state[0] != 'Z':
+                return True
+
+        return False
     except OSError:
         return False
 
@@ -216,11 +236,14 @@ def speak_text(
     if not text or not text.strip():
         return True  # Empty text is not an error
 
+    # Preprocess text for better TTS output
+    processed_text = preprocess_for_tts(text)
+
     try:
         if engine == "pocket-tts":
-            audio, sample_rate = generate_pocket_tts(text, voice)
+            audio, sample_rate = generate_pocket_tts(processed_text, voice)
         else:
-            audio, sample_rate = generate_kokoro(text, voice)
+            audio, sample_rate = generate_kokoro(processed_text, voice)
 
         if stdout:
             audio_normalized = np.clip(audio, -1.0, 1.0)
