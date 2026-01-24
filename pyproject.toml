@@ -1,6 +1,6 @@
 [project]
 name = "speeker"
-version = "1.0.0"
+version = "1.0.8"
 description = "Text-to-speech CLI with multiple engines and voice options"
 requires-python = ">=3.11"
 dependencies = [
@@ -9,6 +9,8 @@ dependencies = [
     "scipy",
     "numpy",
     "torch>=2.5",
+    "fastapi",
+    "uvicorn",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +21,7 @@ test = [
 [project.scripts]
 speeker = "speeker.cli:main"
 speeker-player = "speeker.player:main"
+speeker-server = "speeker.server:main"
 
 [build-system]
 requires = ["hatchling"]

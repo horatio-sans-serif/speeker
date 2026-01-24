@@ -16,7 +16,7 @@ from pathlib import Path
 # Default base directory (can be overridden with SPEEKER_DIR env var)
 DEFAULT_BASE_DIR = Path.home() / ".speeker"
 
-PAUSE_BETWEEN = 3.0  # seconds between audio files
+PAUSE_BETWEEN = 0.5  # seconds between audio files
 
 
 def get_base_dir() -> Path:
@@ -25,13 +25,35 @@ def get_base_dir() -> Path:
 
 
 def get_queue_file() -> Path:
-    """Get the path to the queue file."""
+    """Get the path to the global queue file."""
     return get_base_dir() / "queue"
 
 
 def get_queue_processing() -> Path:
     """Get the path to the processing queue file."""
     return get_base_dir() / "queue.processing"
+
+
+def get_all_queue_files() -> list[Path]:
+    """Get all queue files (global + per-session), oldest first."""
+    base_dir = get_base_dir()
+    queues = []
+
+    # Global queue
+    global_queue = base_dir / "queue"
+    if global_queue.exists():
+        queues.append(global_queue)
+
+    # Per-session queues
+    sessions_dir = base_dir / "sessions"
+    if sessions_dir.exists():
+        for session_dir in sorted(sessions_dir.iterdir()):
+            if session_dir.is_dir():
+                session_queue = session_dir / "queue"
+                if session_queue.exists():
+                    queues.append(session_queue)
+
+    return queues
 
 
 def get_audio_player() -> list[str] | None:
@@ -149,14 +171,15 @@ def play_audio(audio_path: Path, verbose: bool = False) -> bool:
         return False
 
 
-def atomic_take_queue() -> list[str]:
-    """Atomically take ownership of the queue file.
+def atomic_take_queue(queue_file: Path | None = None) -> list[str]:
+    """Atomically take ownership of a queue file.
 
     Renames queue -> queue.processing, reads it, deletes it.
     Returns list of audio file paths.
     """
-    queue_file = get_queue_file()
-    queue_processing = get_queue_processing()
+    if queue_file is None:
+        queue_file = get_queue_file()
+    queue_processing = queue_file.parent / f"{queue_file.name}.processing"
 
     if not queue_file.exists():
         return []
@@ -210,28 +233,62 @@ def process_queue(verbose: bool = False) -> int:
     return played
 
 
+def process_session_queue(queue_file: Path, played_before: bool = False, verbose: bool = False) -> int:
+    """Process all items in a specific queue. Returns number of items played."""
+    entries = atomic_take_queue(queue_file)
+    if not entries:
+        return 0
+
+    tone_path = generate_tone()
+    played = 0
+
+    for i, entry in enumerate(entries):
+        audio_path = Path(entry)
+
+        # Play tone before each item except the very first one ever
+        if i > 0 or played_before:
+            time.sleep(PAUSE_BETWEEN)
+            play_audio(tone_path, verbose=False)
+            time.sleep(0.2)
+
+        if play_audio(audio_path, verbose):
+            played += 1
+
+    # Clean up empty session directory
+    if queue_file.parent.name != ".speeker":
+        try:
+            if not any(queue_file.parent.iterdir()):
+                queue_file.parent.rmdir()
+        except OSError:
+            pass
+
+    return played
+
+
 def run_player(verbose: bool = False) -> None:
-    """Run the player loop - process queue until empty, then exit."""
+    """Run the player loop - process all queues (global + per-session) until empty, then exit."""
     if verbose:
         print("[INFO] Speeker player started", file=sys.stderr)
 
-    queue_file = get_queue_file()
     total_played = 0
 
     while True:
-        played = process_queue(verbose)
-        total_played += played
+        queues = get_all_queue_files()
+        if not queues:
+            break
 
-        if played == 0:
-            if not queue_file.exists():
-                break
+        played_this_round = 0
+        for queue_file in queues:
+            if verbose:
+                print(f"[INFO] Processing queue: {queue_file}", file=sys.stderr)
+            # Pass whether we've played anything before (for tone between batches)
+            played = process_session_queue(queue_file, played_before=(total_played > 0), verbose=verbose)
+            played_this_round += played
+            total_played += played
 
-            try:
-                with open(queue_file, "r") as f:
-                    has_entries = any(line.strip() and not line.strip().startswith("#") for line in f)
-                if not has_entries:
-                    break
-            except OSError:
+        if played_this_round == 0:
+            # Double-check no new queues appeared
+            if not get_all_queue_files():
                 break
 
     if verbose:

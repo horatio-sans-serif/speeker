@@ -2099,14 +2099,16 @@ wheels = [
 
 [[package]]
 name = "speeker"
-version = "1.0.0"
+version = "1.0.8"
 source = { editable = "." }
 dependencies = [
+    { name = "fastapi" },
     { name = "kokoro" },
     { name = "numpy" },
     { name = "pocket-tts" },
     { name = "scipy" },
     { name = "torch" },
+    { name = "uvicorn" },
 ]
 
 [package.optional-dependencies]
@@ -2116,12 +2118,14 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "fastapi" },
     { name = "faster-whisper", marker = "extra == 'test'", specifier = ">=1.2.1" },
     { name = "kokoro", specifier = ">=0.1.0" },
     { name = "numpy" },
     { name = "pocket-tts", specifier = ">=0.1.0" },
     { name = "scipy" },
     { name = "torch", specifier = ">=2.5" },
+    { name = "uvicorn" },
 ]
 provides-extras = ["test"]
 
