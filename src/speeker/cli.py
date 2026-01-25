@@ -202,9 +202,24 @@ def start_player() -> None:
     if is_player_running():
         return
 
+    # Find speeker-player - check PATH first, then common locations
+    player_cmd = shutil.which("speeker-player")
+    if not player_cmd:
+        # Fallback to common install locations
+        for path in [
+            Path.home() / ".local/bin/speeker-player",
+            Path("/usr/local/bin/speeker-player"),
+        ]:
+            if path.exists():
+                player_cmd = str(path)
+                break
+
+    if not player_cmd:
+        return  # Can't find player
+
     try:
         subprocess.Popen(
-            ["speeker-player"],
+            [player_cmd],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
