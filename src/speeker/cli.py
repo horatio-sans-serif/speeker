@@ -219,7 +219,7 @@ def start_player() -> None:
 
     try:
         subprocess.Popen(
-            [player_cmd],
+            [player_cmd, "--daemon"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

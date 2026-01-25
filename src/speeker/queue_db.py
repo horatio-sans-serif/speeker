@@ -164,8 +164,11 @@ def cleanup_old_entries(days: int = 7) -> int:
         return cursor.rowcount
 
 
-def relative_time(dt_str: str) -> str:
-    """Convert ISO datetime string to relative time phrase."""
+def relative_time(dt_str: str) -> str | None:
+    """Convert ISO datetime string to relative time phrase.
+
+    Returns None for very recent times (< 2 minutes) to skip the phrase.
+    """
     dt = datetime.fromisoformat(dt_str)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
@@ -175,12 +178,8 @@ def relative_time(dt_str: str) -> str:
 
     seconds = int(diff.total_seconds())
 
-    if seconds < 0:
-        return "just now"
-    elif seconds < 60:
-        return "just now"
-    elif seconds < 120:
-        return "about a minute ago"
+    if seconds < 120:
+        return None  # Skip time phrase for recent messages
     elif seconds < 3600:
         minutes = seconds // 60
         return f"about {minutes} minutes ago"

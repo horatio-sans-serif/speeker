@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Speeker playback - processes SQLite queue and plays audio with session announcements.
+"""Speeker playback daemon - watches SQLite queue and plays TTS immediately.
 
-Supports macOS (afplay), Linux (paplay/aplay/ffplay), and Windows (PowerShell).
+Keeps TTS model warm for low-latency speech generation.
 """
 
 import os
@@ -13,9 +13,14 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pocket_tts import TTSModel
 
 from .queue_db import (
     get_last_utterance_time,
+    get_pending_count,
     get_pending_for_session,
     get_sessions_with_pending,
     mark_played,
@@ -28,12 +33,18 @@ from .queue_db import (
 # Default base directory
 DEFAULT_BASE_DIR = Path.home() / ".speeker"
 
-# Pause between messages
+# Timing
 PAUSE_BETWEEN_MESSAGES = 0.3
 PAUSE_BETWEEN_SESSIONS = 0.5
+POLL_INTERVAL = 0.5  # Check queue every 500ms
+IDLE_TIMEOUT = 300  # Exit after 5 minutes of no activity
 
 # How long before we re-announce "This is Claude Code"
 ANNOUNCE_THRESHOLD_MINUTES = 30
+
+# Lazy-loaded TTS model (expensive to initialize, kept warm)
+_tts_model: "TTSModel | None" = None
+_voice_states: dict[str, object] = {}
 
 
 def get_base_dir() -> Path:
@@ -57,7 +68,7 @@ def get_audio_player() -> list[str] | None:
             return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
     elif system == "Windows":
         if shutil.which("powershell"):
-            return None  # Special handling
+            return None
 
     if shutil.which("ffplay"):
         return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
@@ -66,6 +77,26 @@ def get_audio_player() -> list[str] | None:
 
 
 AUDIO_PLAYER = get_audio_player()
+
+
+def get_tts_model() -> "TTSModel":
+    """Get the TTS model, loading it if needed (kept warm for fast responses)."""
+    global _tts_model
+    if _tts_model is None:
+        from pocket_tts import TTSModel
+        _tts_model = TTSModel.load_model()
+    return _tts_model
+
+
+def get_voice_state(voice: str) -> object:
+    """Get or create voice state for the given voice."""
+    global _voice_states
+    if voice not in _voice_states:
+        from .voices import get_pocket_tts_voice_path
+        model = get_tts_model()
+        voice_path = get_pocket_tts_voice_path(voice)
+        _voice_states[voice] = model.get_state_for_audio_prompt(voice_path)
+    return _voice_states[voice]
 
 
 def play_audio(audio_path: Path, verbose: bool = False) -> bool:
@@ -105,22 +136,24 @@ def play_audio(audio_path: Path, verbose: bool = False) -> bool:
 
 
 def generate_tts(text: str, verbose: bool = False) -> Path | None:
-    """Generate TTS audio for text. Returns path to audio file or None on failure."""
+    """Generate TTS audio for text. Returns path to temp audio file."""
     try:
-        # Import TTS components
-        from .cli import get_pocket_tts_model, get_pocket_tts_voice_state
-        from .voices import get_default_voice
         import numpy as np
         from scipy.io import wavfile
+        from .voices import get_default_voice
+        from .preprocessing import preprocess_for_tts
 
         if verbose:
-            print(f"[TTS] Generating: {text[:50]}...", file=sys.stderr)
+            print(f"[TTS] {text[:60]}{'...' if len(text) > 60 else ''}", file=sys.stderr)
 
-        # Generate audio
-        model = get_pocket_tts_model()
+        # Preprocess text
+        processed = preprocess_for_tts(text)
+
+        # Generate audio (model is kept warm)
+        model = get_tts_model()
         voice = get_default_voice("pocket-tts")
-        voice_state = get_pocket_tts_voice_state(voice)
-        audio = model.generate_audio(voice_state, text)
+        voice_state = get_voice_state(voice)
+        audio = model.generate_audio(voice_state, processed)
 
         # Save to temp file
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -131,7 +164,7 @@ def generate_tts(text: str, verbose: bool = False) -> Path | None:
 
     except Exception as e:
         if verbose:
-            print(f"[ERROR] TTS generation failed: {e}", file=sys.stderr)
+            print(f"[ERROR] TTS failed: {e}", file=sys.stderr)
         return None
 
 
@@ -142,10 +175,8 @@ def speak_text(text: str, verbose: bool = False) -> bool:
         return False
 
     try:
-        success = play_audio(audio_path, verbose)
-        return success
+        return play_audio(audio_path, verbose)
     finally:
-        # Clean up temp file
         try:
             audio_path.unlink()
         except OSError:
@@ -157,63 +188,74 @@ def should_announce_intro() -> bool:
     last_time = get_last_utterance_time()
     if last_time is None:
         return True
-
     threshold = datetime.now(timezone.utc) - timedelta(minutes=ANNOUNCE_THRESHOLD_MINUTES)
     return last_time < threshold
 
 
-def build_session_script(session_id: str, items: list[dict]) -> list[str]:
+def build_session_script(session_id: str, items: list[dict], is_only_session: bool) -> list[str]:
     """Build the speech script for a session's messages."""
     lines = []
     count = len(items)
     session_label = get_session_label(session_id)
 
-    # Session header
-    if count == 1:
-        lines.append(f"For {session_label}, there is 1 message.")
-    else:
-        lines.append(f"For {session_label}, there are {count} messages.")
+    # Session header (skip if single message in single session)
+    if not (count == 1 and is_only_session):
+        if count == 1:
+            lines.append(f"For {session_label}, there is 1 message.")
+        else:
+            lines.append(f"For {session_label}, there are {count} messages.")
 
     # Each message
     for i, item in enumerate(items):
         time_ago = relative_time(item["created_at"])
         text = item["text"]
 
-        if i == 0 and count > 1:
-            prefix = "The first message"
-        elif i == count - 1 and count > 1:
-            prefix = "The last message"
-        elif count == 1:
-            prefix = "It"
+        if count == 1 and is_only_session:
+            # Single message total - just say the text
+            if time_ago:
+                lines.append(f"From {time_ago}: {text}")
+            else:
+                lines.append(text)
         else:
-            prefix = "The next message"
+            # Multiple messages
+            if i == 0 and count > 1:
+                prefix = "First"
+            elif i == count - 1 and count > 1:
+                prefix = "Last"
+            elif count == 1:
+                prefix = "It"
+            else:
+                prefix = "Next"
 
-        lines.append(f"{prefix} was created {time_ago} and says: {text}")
+            if time_ago:
+                lines.append(f"{prefix}, from {time_ago}: {text}")
+            else:
+                lines.append(f"{prefix}: {text}")
 
     return lines
 
 
-def run_player(verbose: bool = False) -> None:
-    """Run the player - process all pending messages with announcements."""
-    if verbose:
-        print("[INFO] Speeker player started", file=sys.stderr)
-
+def process_queue(verbose: bool = False) -> int:
+    """Process all pending messages. Returns count of messages played."""
     sessions = get_sessions_with_pending()
     if not sessions:
-        if verbose:
-            print("[INFO] No pending messages", file=sys.stderr)
-        return
+        return 0
+
+    # Count total messages
+    total_messages = sum(len(get_pending_for_session(s)) for s in sessions)
+    is_single_message = total_messages == 1
 
     total_played = 0
 
     # Intro announcement if needed
-    if should_announce_intro():
+    if should_announce_intro() and not is_single_message:
         if verbose:
             print("[INFO] Announcing intro", file=sys.stderr)
         speak_text("This is Claude Code.", verbose)
         time.sleep(PAUSE_BETWEEN_SESSIONS)
 
     # Process each session
+    is_only_session = len(sessions) == 1
     for session_idx, session_id in enumerate(sessions):
         items = get_pending_for_session(session_id)
         if not items:
@@ -222,8 +264,7 @@ def run_player(verbose: bool = False) -> None:
         if session_idx > 0:
             time.sleep(PAUSE_BETWEEN_SESSIONS)
 
-        # Build and speak the script for this session
-        script_lines = build_session_script(session_id, items)
+        script_lines = build_session_script(session_id, items, is_only_session)
 
         for line_idx, line in enumerate(script_lines):
             if line_idx > 0:
@@ -232,52 +273,71 @@ def run_player(verbose: bool = False) -> None:
             if speak_text(line, verbose):
                 total_played += 1
 
-        # Mark all items as played
+        # Mark items as played
         for item in items:
             mark_played(item["id"])
 
-    # Outro
-    if total_played > 0:
+    # Outro (skip if single message)
+    if total_played > 0 and not is_single_message:
         time.sleep(PAUSE_BETWEEN_SESSIONS)
         speak_text("That is all.", verbose)
+
+    if total_played > 0:
         set_last_utterance_time()
 
+    return total_played
+
+
+def run_daemon(verbose: bool = False) -> None:
+    """Run as a daemon - watch queue and process items immediately."""
     if verbose:
-        print(f"[INFO] Speeker player done. Played {total_played} utterance(s)", file=sys.stderr)
+        print("[INFO] Speeker player daemon starting...", file=sys.stderr)
+
+    # Pre-warm the TTS model
+    if verbose:
+        print("[INFO] Warming up TTS model...", file=sys.stderr)
+    get_tts_model()
+    get_voice_state("azelma")  # Default voice
+    if verbose:
+        print("[INFO] TTS model ready!", file=sys.stderr)
+
+    last_activity = time.time()
+
+    while True:
+        pending = get_pending_count()
+
+        if pending > 0:
+            if verbose:
+                print(f"[INFO] Processing {pending} pending item(s)", file=sys.stderr)
+            process_queue(verbose)
+            last_activity = time.time()
+        else:
+            # Check for idle timeout
+            if time.time() - last_activity > IDLE_TIMEOUT:
+                if verbose:
+                    print("[INFO] Idle timeout, exiting", file=sys.stderr)
+                break
+
+        time.sleep(POLL_INTERVAL)
+
+
+def run_once(verbose: bool = False) -> None:
+    """Run once - process queue and exit."""
+    if verbose:
+        print("[INFO] Speeker player (one-shot mode)", file=sys.stderr)
+
+    played = process_queue(verbose)
+
+    if verbose:
+        print(f"[INFO] Done. Played {played} utterance(s)", file=sys.stderr)
 
 
 def cleanup_old_files(days: int, verbose: bool = False) -> int:
-    """Remove old audio files and database entries."""
-    base_dir = get_base_dir()
-    removed = 0
-
-    # Clean database
-    db_removed = cleanup_old_entries(days)
-    if verbose and db_removed:
-        print(f"[CLEANUP] Removed {db_removed} database entries", file=sys.stderr)
-
-    # Clean audio files
-    if base_dir.exists():
-        from datetime import datetime as dt
-        cutoff = dt.now() - timedelta(days=days)
-
-        for day_dir in base_dir.iterdir():
-            if not day_dir.is_dir():
-                continue
-            try:
-                dir_date = dt.strptime(day_dir.name, "%Y-%m-%d")
-            except ValueError:
-                continue
-
-            if dir_date < cutoff:
-                if verbose:
-                    print(f"[CLEANUP] Removing {day_dir}", file=sys.stderr)
-                for f in day_dir.iterdir():
-                    f.unlink()
-                    removed += 1
-                day_dir.rmdir()
-
-    return removed + db_removed
+    """Remove old database entries."""
+    removed = cleanup_old_entries(days)
+    if verbose:
+        print(f"[CLEANUP] Removed {removed} database entries", file=sys.stderr)
+    return removed
 
 
 def main() -> int:
@@ -286,25 +346,27 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         prog="speeker-player",
-        description="Speeker playback - processes queue with session announcements",
+        description="Speeker TTS playback daemon",
     )
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
-    parser.add_argument(
-        "--cleanup",
-        type=int,
-        metavar="DAYS",
-        help="Remove entries older than DAYS days and exit",
-    )
+    parser.add_argument("--daemon", "-d", action="store_true",
+                        help="Run as daemon (watch queue, keep model warm)")
+    parser.add_argument("--cleanup", type=int, metavar="DAYS",
+                        help="Remove entries older than DAYS days and exit")
 
     args = parser.parse_args()
     get_base_dir().mkdir(parents=True, exist_ok=True)
 
     if args.cleanup is not None:
         removed = cleanup_old_files(args.cleanup, args.verbose)
-        print(f"[INFO] Removed {removed} item(s)", file=sys.stderr)
+        print(f"Removed {removed} item(s)", file=sys.stderr)
         return 0
 
-    run_player(args.verbose)
+    if args.daemon:
+        run_daemon(args.verbose)
+    else:
+        run_once(args.verbose)
+
     return 0
 
 
