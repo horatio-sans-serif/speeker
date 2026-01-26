@@ -1,217 +1,235 @@
 # Speeker
 
-A text-to-speech CLI with multiple engines and voice options. Generate natural-sounding speech from text using local TTS models.
+A text-to-speech system with HTTP API, web UI, and CLI. Queue text for playback with metadata, search history, and configurable voices.
 
 ## Features
 
-- **Multiple TTS engines**: pocket-tts (lightweight) and kokoro (higher quality)
-- **18 voice options**: Various male/female voices with different accents and styles
-- **Streaming support**: Speak text as it arrives via stdin (sentence-by-sentence)
-- **Background playback**: Audio is queued and played asynchronously
-- **Cross-platform**: macOS, Linux, and Windows support
-- **Automatic MP3 conversion**: Smaller files when ffmpeg is available
+- **HTTP API**: Queue text via REST endpoints with metadata support
+- **Web UI**: View queue history, play audio, search messages
+- **Multiple TTS engines**: pocket-tts (fast) and kokoro (higher quality)
+- **Daemon mode**: Low-latency playback with warm TTS model
+- **Metadata**: Attach arbitrary key-value data to messages
+- **Search**: Fuzzy text search or semantic search with embeddings
+- **Per-session settings**: Speed, voice, intro/outro sounds
 
 ## Installation
 
 Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
-cd ~/projects/speeker
-uv sync
+uv tool install speeker
 ```
 
-For global installation:
+For semantic search support:
 
 ```bash
-uv tool install .
+uv tool install speeker[semantic]
 ```
 
-## Usage
-
-### Basic Speech Generation
+## Quick Start
 
 ```bash
-# Speak text directly
-speeker speak "Hello, world!"
+# Start the server
+speeker-server
 
-# Read from stdin
-echo "Hello from stdin" | speeker speak
+# Queue text via API
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, world!"}'
 
-# Use a different engine and voice
-speeker speak -e kokoro -v bf_emma "British accent"
-
-# Generate audio without playing
-speeker speak --no-play "Save this for later"
+# View web UI
+open http://127.0.0.1:7849/
 ```
 
-### Streaming Mode
+## HTTP API
 
-Process text as it arrives, speaking sentence-by-sentence:
+### POST /speak
+
+Queue text for TTS playback.
 
 ```bash
-# Stream from a command (use -s or --stream)
-some-command | speeker speak -s
+# Simple text
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello, world!"}'
 
-# Stream from an LLM or chatbot
-llm "Tell me a story" | speeker speak --stream
+# With metadata via JSON body
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Task complete", "metadata": {"source": "claude", "project": "myapp"}}'
 
-# With custom voice
-cat long-document.txt | speeker speak -s -e kokoro -v am_liam
+# With metadata via query params (! prefix, URL-encode ! as %21)
+curl -X POST 'http://127.0.0.1:7849/speak?%21source=claude&%21project=myapp' \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Task complete"}'
 ```
 
-Streaming mode detects sentence boundaries (`.`, `!`, `?`) and speaks each sentence as soon as it's complete. This provides near-real-time speech for streaming text sources like LLMs.
+### POST /summarize
 
-### List Available Voices
+Summarize text and queue for playback (requires LLM backend).
 
 ```bash
-speeker voices
-
-# Filter by engine
-speeker voices -e pocket-tts
+curl -X POST http://127.0.0.1:7849/summarize \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Long text to summarize..."}'
 ```
 
-### Check Status
+### GET /
+
+Web UI showing queue history with search.
+
+### GET /settings
+
+Settings page for global or per-session configuration.
+
+### GET /health
+
+Health check endpoint.
+
+## Web UI
+
+Access at `http://127.0.0.1:7849/`
+
+- **Search**: Type to search (debounced, no button needed)
+- **Data column**: Click to expand metadata key-value pairs
+- **Play**: Click to play audio in browser
+- **Status**: Shows Played/Pending state
+
+## CLI
+
+### speeker-server
 
 ```bash
-speeker status
+speeker-server              # Start on default port 7849
+speeker-server -p 8080      # Custom port
+speeker-server -H 0.0.0.0   # Bind to all interfaces
 ```
 
-Shows base directory, player status, queue length, and total audio files.
-
-### Player Management
+### speeker-player
 
 ```bash
-# Start the player manually (usually automatic)
-speeker play
-
-# Run player with verbose output
-speeker-player -v
-
-# Clean up old audio files (older than 7 days)
-speeker-player --cleanup 7
+speeker-player              # Process queue once
+speeker-player --daemon     # Run as daemon (low latency)
+speeker-player --cleanup 7  # Delete audio older than 7 days
 ```
+
+### speeker
+
+```bash
+speeker speak "Hello"           # Generate and queue audio
+speeker speak -s                # Stream mode (sentence by sentence)
+speeker speak -e kokoro         # Use kokoro engine
+speeker speak -v bf_emma        # Use specific voice
+speeker voices                  # List available voices
+speeker status                  # Show queue status
+```
+
+## Configuration
+
+### Server Config
+
+`~/.config/speeker/config.json`:
+
+```json
+{
+    "semantic_search": {
+        "enabled": false,
+        "model": "all-MiniLM-L6-v2",
+        "cache_dir": null
+    }
+}
+```
+
+### Settings (via Web UI or API)
+
+Settings are hierarchical: global defaults with per-session overrides.
+
+| Setting       | Default  | Description                    |
+| ------------- | -------- | ------------------------------ |
+| `intro_sound` | true     | Play tone before/after batches |
+| `speed`       | 1.0      | Playback speed (0.5 - 2.0)     |
+| `voice`       | "azelma" | TTS voice name                 |
 
 ## Voices
 
-### pocket-tts (default engine, lightweight)
+### pocket-tts (default, fast)
 
 | Voice    | Description                        |
 | -------- | ---------------------------------- |
 | azelma\* | Female, natural and conversational |
 | alba     | Female, soft and warm              |
-| cosette  | Female, young and bright           |
-| eponine  | Female, spirited and dynamic       |
-| fantine  | Female, emotional and melodic      |
 | javert   | Male, deep and authoritative       |
-| jean     | Male, gentle and expressive        |
 | marius   | Male, clear and articulate         |
 
 ### kokoro (higher quality)
 
-| Voice       | Description                             |
-| ----------- | --------------------------------------- |
-| am_liam\*   | American male, clear and professional   |
-| af_bella    | American female, warm and friendly      |
-| af_nicole   | American female, bright and energetic   |
-| af_sarah    | American female, calm and soothing      |
-| am_adam     | American male, deep and resonant        |
-| am_michael  | American male, natural and casual       |
-| bf_emma     | British female, refined and elegant     |
-| bf_isabella | British female, warm and expressive     |
-| bm_george   | British male, classic and articulate    |
-| bm_lewis    | British male, modern and conversational |
+| Voice     | Description                           |
+| --------- | ------------------------------------- |
+| am_liam\* | American male, clear and professional |
+| af_bella  | American female, warm and friendly    |
+| bf_emma   | British female, refined and elegant   |
+| bm_george | British male, classic and articulate  |
 
 \* = default voice for engine
 
-## How It Works
-
-### Architecture
+## Architecture
 
 ```
 ┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│ speeker CLI │────▶│ TTS Engine   │────▶│ Audio File  │
-│             │     │ (pocket-tts/ │     │ (.mp3/.wav) │
-│             │     │  kokoro)     │     │             │
+│ HTTP API    │────▶│ SQLite Queue │────▶│ Player      │
+│ /speak      │     │ + Metadata   │     │ Daemon      │
+│ /summarize  │     │ + Embeddings │     │             │
 └─────────────┘     └──────────────┘     └──────┬──────┘
-                                                │
-                                                ▼
-┌─────────────┐     ┌──────────────┐     ┌─────────────┐
-│ System      │◀────│ speeker-     │◀────│ Queue File  │
-│ Audio       │     │ player       │     │             │
-└─────────────┘     └──────────────┘     └─────────────┘
+       │                                        │
+       ▼                                        ▼
+┌─────────────┐                          ┌─────────────┐
+│ Web UI      │                          │ TTS Engine  │
+│ Search      │                          │ Audio Out   │
+│ History     │                          │             │
+└─────────────┘                          └─────────────┘
 ```
 
-1. **Text input**: The CLI receives text from arguments or stdin
-2. **TTS generation**: Text is converted to audio using the selected engine
-3. **File storage**: Audio is saved to `~/.speeker/YYYY-MM-DD/` with a timestamp
-4. **Queue**: The audio file path is appended to a queue file
-5. **Playback**: The background player processes the queue and plays audio
-6. **Cleanup**: Old files can be removed with `speeker-player --cleanup DAYS`
-
-### File Structure
+### Storage
 
 ```
 ~/.speeker/
-├── 2024-01-15/
-│   ├── 2024-01-15-10-30-45.mp3    # Audio file
-│   ├── 2024-01-15-10-30-45.txt    # Original text
-│   └── ...
-├── queue                           # Pending audio files
-├── queue.processing                # Currently playing (temporary)
-└── .tone.wav                       # Transition sound between files
+├── queue.db                    # SQLite database
+└── audio/
+    └── 2024-01-15/
+        ├── 123.wav             # Audio files by queue ID
+        └── 124.wav
+
+~/.config/speeker/
+└── config.json                 # Server configuration
 ```
 
-### Streaming Mode
+### Database Schema
 
-In streaming mode (`--stream`), text is processed incrementally:
+**queue** - Message history
 
-1. Characters are buffered as they arrive from stdin
-2. When a sentence boundary is detected (`. `, `! `, `? `, or newline after punctuation), the sentence is spoken
-3. Multiple sentences can be queued while earlier ones are still playing
-4. Remaining text is spoken when stdin closes
+- `id`, `session_id`, `text`, `audio_path`, `metadata` (JSON)
+- `created_at`, `played_at`
 
-This enables near-real-time speech for streaming sources like LLMs.
+**embeddings** - Semantic search vectors
 
-## Configuration
+- `queue_id`, `embedding` (BLOB)
 
-### Environment Variables
+**settings** - Per-session settings
 
-| Variable      | Default      | Description                              |
-| ------------- | ------------ | ---------------------------------------- |
-| `SPEEKER_DIR` | `~/.speeker` | Base directory for audio files and queue |
-
-### Audio Players
-
-Speeker automatically detects and uses the best available audio player:
-
-- **macOS**: `afplay` (built-in)
-- **Linux**: `paplay` (PulseAudio), `aplay` (ALSA), or `ffplay` (FFmpeg)
-- **Windows**: PowerShell `Media.SoundPlayer`
-
-### MP3 Conversion
-
-If `ffmpeg` is installed, audio is automatically converted from WAV to MP3 (64kbps) for smaller file sizes. Otherwise, WAV files are used.
-
-## Dependencies
-
-Core dependencies (installed automatically):
-
-- `pocket-tts` - Lightweight TTS engine
-- `kokoro` - High-quality TTS engine
-- `scipy` - Audio file handling
-- `numpy` - Audio processing
-- `torch` - Neural network backend
+- `session_id`, `intro_sound`, `speed`, `voice`
 
 ## Development
 
 ```bash
+# Clone and install
+git clone https://github.com/horatio-sans-serif/speeker
+cd speeker
+uv sync
+
 # Run from source
-uv run speeker speak "test"
+uv run speeker-server
 
-# Run tests
-uv run pytest
-
-# Format code
+# Format
 uv run ruff format src/
 ```
 
