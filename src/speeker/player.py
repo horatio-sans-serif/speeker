@@ -19,10 +19,12 @@ if TYPE_CHECKING:
     from pocket_tts import TTSModel
 
 from .queue_db import (
+    get_connection,
     get_last_utterance_time,
     get_pending_count,
     get_pending_for_session,
     get_sessions_with_pending,
+    get_settings,
     mark_played,
     relative_time,
     get_session_label,
@@ -45,6 +47,10 @@ ANNOUNCE_THRESHOLD_MINUTES = 30
 # Lazy-loaded TTS model (expensive to initialize, kept warm)
 _tts_model: "TTSModel | None" = None
 _voice_states: dict[str, object] = {}
+
+# Cached sound files
+_intro_sound_path: Path | None = None
+_outro_sound_path: Path | None = None
 
 
 def get_base_dir() -> Path:
@@ -99,6 +105,80 @@ def get_voice_state(voice: str) -> object:
     return _voice_states[voice]
 
 
+def generate_tone(frequencies: list[int], rising: bool = True) -> Path:
+    """Generate a multi-note tone.
+
+    Args:
+        frequencies: List of frequencies to play in sequence
+        rising: If True, play in order (intro). If False, reverse (outro).
+    """
+    import math
+    import struct
+    import wave
+
+    base_dir = get_base_dir()
+    suffix = "intro" if rising else "outro"
+    tone_path = base_dir / f".tone_{suffix}.wav"
+
+    if tone_path.exists():
+        return tone_path
+
+    if not rising:
+        frequencies = list(reversed(frequencies))
+
+    sample_rate = 44100
+    amplitude = 0.3
+    note_duration = 0.12
+    gap_duration = 0.03
+
+    samples = []
+    for note_idx, frequency in enumerate(frequencies):
+        n_samples = int(sample_rate * note_duration)
+        fade_samples = int(sample_rate * 0.015)
+
+        for i in range(n_samples):
+            t = i / sample_rate
+            if i < fade_samples:
+                envelope = i / fade_samples
+            elif i > n_samples - fade_samples:
+                envelope = (n_samples - i) / fade_samples
+            else:
+                envelope = 1.0
+            value = amplitude * envelope * math.sin(2 * math.pi * frequency * t)
+            samples.append(int(value * 32767))
+
+        if note_idx < len(frequencies) - 1:
+            gap_samples = int(sample_rate * gap_duration)
+            samples.extend([0] * gap_samples)
+
+    base_dir.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(tone_path), "w") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(struct.pack(f"{len(samples)}h", *samples))
+
+    return tone_path
+
+
+def get_intro_sound() -> Path:
+    """Get path to intro sound (rising pitch)."""
+    global _intro_sound_path
+    if _intro_sound_path is None:
+        # E4 -> G4 -> C5 (rising major chord)
+        _intro_sound_path = generate_tone([330, 392, 523], rising=True)
+    return _intro_sound_path
+
+
+def get_outro_sound() -> Path:
+    """Get path to outro sound (falling pitch)."""
+    global _outro_sound_path
+    if _outro_sound_path is None:
+        # C5 -> G4 -> E4 (falling major chord)
+        _outro_sound_path = generate_tone([523, 392, 330], rising=False)
+    return _outro_sound_path
+
+
 def play_audio(audio_path: Path, verbose: bool = False) -> bool:
     """Play an audio file. Returns True on success."""
     if not audio_path.exists():
@@ -135,8 +215,25 @@ def play_audio(audio_path: Path, verbose: bool = False) -> bool:
         return False
 
 
-def generate_tts(text: str, verbose: bool = False) -> Path | None:
-    """Generate TTS audio for text. Returns path to temp audio file."""
+def generate_tts(
+    text: str,
+    voice: str | None = None,
+    speed: float = 1.0,
+    save_path: Path | None = None,
+    verbose: bool = False,
+) -> Path | None:
+    """Generate TTS audio for text.
+
+    Args:
+        text: Text to speak
+        voice: Voice to use (default: azelma)
+        speed: Playback speed multiplier (default: 1.0)
+        save_path: If provided, save to this path instead of temp file
+        verbose: Print debug info
+
+    Returns:
+        Path to audio file, or None on failure
+    """
     try:
         import numpy as np
         from scipy.io import wavfile
@@ -151,16 +248,31 @@ def generate_tts(text: str, verbose: bool = False) -> Path | None:
 
         # Generate audio (model is kept warm)
         model = get_tts_model()
-        voice = get_default_voice("pocket-tts")
+        voice = voice or get_default_voice("pocket-tts")
         voice_state = get_voice_state(voice)
         audio = model.generate_audio(voice_state, processed)
 
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-            audio_normalized = np.clip(audio.numpy(), -1.0, 1.0)
-            audio_int16 = (audio_normalized * 32767).astype(np.int16)
-            wavfile.write(f.name, model.sample_rate, audio_int16)
-            return Path(f.name)
+        # Apply speed adjustment by resampling
+        audio_np = audio.numpy()
+        if speed != 1.0 and speed > 0:
+            from scipy import signal
+            # Resample to change speed (higher speed = fewer samples)
+            new_length = int(len(audio_np) / speed)
+            audio_np = signal.resample(audio_np, new_length)
+
+        # Normalize and convert to int16
+        audio_normalized = np.clip(audio_np, -1.0, 1.0)
+        audio_int16 = (audio_normalized * 32767).astype(np.int16)
+
+        # Save to file
+        if save_path:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            wavfile.write(str(save_path), model.sample_rate, audio_int16)
+            return save_path
+        else:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                wavfile.write(f.name, model.sample_rate, audio_int16)
+                return Path(f.name)
 
     except Exception as e:
         if verbose:
@@ -168,19 +280,31 @@ def generate_tts(text: str, verbose: bool = False) -> Path | None:
         return None
 
 
-def speak_text(text: str, verbose: bool = False) -> bool:
-    """Generate and play TTS for text. Returns True on success."""
-    audio_path = generate_tts(text, verbose)
+def speak_text(
+    text: str,
+    voice: str | None = None,
+    speed: float = 1.0,
+    save_path: Path | None = None,
+    verbose: bool = False,
+) -> Path | None:
+    """Generate and play TTS for text.
+
+    Returns path to saved audio file if save_path provided, else None.
+    """
+    audio_path = generate_tts(text, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
     if audio_path is None:
-        return False
+        return None
 
     try:
-        return play_audio(audio_path, verbose)
+        play_audio(audio_path, verbose)
+        return save_path  # Return saved path if we saved it
     finally:
-        try:
-            audio_path.unlink()
-        except OSError:
-            pass
+        # Clean up temp files (not saved files)
+        if save_path is None and audio_path:
+            try:
+                audio_path.unlink()
+            except OSError:
+                pass
 
 
 def should_announce_intro() -> bool:
@@ -235,6 +359,26 @@ def build_session_script(session_id: str, items: list[dict], is_only_session: bo
     return lines
 
 
+def update_audio_path(item_id: int, audio_path: Path) -> None:
+    """Update the audio_path for a queue item."""
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE queue SET audio_path = ? WHERE id = ?",
+            (str(audio_path), item_id)
+        )
+        conn.commit()
+
+
+def get_audio_save_path(item_id: int) -> Path:
+    """Get the path where audio for this item should be saved."""
+    from datetime import datetime
+    base_dir = get_base_dir()
+    today = datetime.now().strftime("%Y-%m-%d")
+    audio_dir = base_dir / "audio" / today
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    return audio_dir / f"{item_id}.wav"
+
+
 def process_queue(verbose: bool = False) -> int:
     """Process all pending messages. Returns count of messages played."""
     sessions = get_sessions_with_pending()
@@ -247,11 +391,16 @@ def process_queue(verbose: bool = False) -> int:
 
     total_played = 0
 
-    # Intro announcement if needed
-    if should_announce_intro() and not is_single_message:
+    # Get global settings for intro
+    global_settings = get_settings()
+
+    # Intro sound if enabled and not single message
+    if should_announce_intro() and not is_single_message and global_settings["intro_sound"]:
         if verbose:
-            print("[INFO] Announcing intro", file=sys.stderr)
-        speak_text("This is Claude Code.", verbose)
+            print("[INFO] Playing intro sound", file=sys.stderr)
+        play_audio(get_intro_sound(), verbose)
+        time.sleep(0.2)
+        speak_text("This is Claude Code.", verbose=verbose)
         time.sleep(PAUSE_BETWEEN_SESSIONS)
 
     # Process each session
@@ -260,6 +409,11 @@ def process_queue(verbose: bool = False) -> int:
         items = get_pending_for_session(session_id)
         if not items:
             continue
+
+        # Get settings for this session
+        settings = get_settings(session_id)
+        voice = settings["voice"]
+        speed = settings["speed"]
 
         if session_idx > 0:
             time.sleep(PAUSE_BETWEEN_SESSIONS)
@@ -270,17 +424,31 @@ def process_queue(verbose: bool = False) -> int:
             if line_idx > 0:
                 time.sleep(PAUSE_BETWEEN_MESSAGES)
 
-            if speak_text(line, verbose):
+            # Determine which item this line corresponds to (for saving audio)
+            # Script: [header], [msg1], [msg2], ...
+            item_idx = line_idx - 1 if not (len(items) == 1 and is_only_session) else line_idx
+            save_path = None
+            if 0 <= item_idx < len(items):
+                save_path = get_audio_save_path(items[item_idx]["id"])
+
+            result = speak_text(line, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
+
+            if result is not None or save_path is None:
                 total_played += 1
+                # Update audio path in database
+                if save_path and 0 <= item_idx < len(items):
+                    update_audio_path(items[item_idx]["id"], save_path)
 
         # Mark items as played
         for item in items:
             mark_played(item["id"])
 
     # Outro (skip if single message)
-    if total_played > 0 and not is_single_message:
+    if total_played > 0 and not is_single_message and global_settings["intro_sound"]:
         time.sleep(PAUSE_BETWEEN_SESSIONS)
-        speak_text("That is all.", verbose)
+        speak_text("That is all.", verbose=verbose)
+        time.sleep(0.2)
+        play_audio(get_outro_sound(), verbose)
 
     if total_played > 0:
         set_last_utterance_time()

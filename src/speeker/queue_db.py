@@ -23,11 +23,16 @@ def get_db_path() -> Path:
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
-    """Get a thread-local database connection."""
+    """Get a thread-local database connection with proper locking."""
     if not hasattr(_local, "conn") or _local.conn is None:
         db_path = get_db_path()
-        _local.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        _local.conn = sqlite3.connect(
+            str(db_path),
+            check_same_thread=False,
+            timeout=30.0,  # Wait up to 30s for locks
+        )
         _local.conn.row_factory = sqlite3.Row
+        _local.conn.execute("PRAGMA journal_mode=WAL")  # Better concurrency
         _init_db(_local.conn)
 
     yield _local.conn
@@ -51,9 +56,27 @@ def _init_db(conn: sqlite3.Connection) -> None:
             last_utterance_at TEXT
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            session_id TEXT PRIMARY KEY,
+            intro_sound INTEGER DEFAULT 1,
+            speed REAL DEFAULT 1.0,
+            voice TEXT DEFAULT 'azelma'
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_session ON queue(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_played ON queue(played_at)")
     conn.commit()
+
+    # Ensure global defaults exist (use a separate try/except to avoid lock issues)
+    try:
+        conn.execute("""
+            INSERT OR IGNORE INTO settings (session_id, intro_sound, speed, voice)
+            VALUES ('__global__', 1, 1.0, 'azelma')
+        """)
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # Already exists or locked, that's fine
 
 
 def enqueue(session_id: str, text: str, audio_path: str | Path | None = None) -> int:
@@ -202,3 +225,140 @@ def get_session_label(session_id: str) -> str:
     # Use first 8 chars of session ID
     short_id = session_id[:8] if len(session_id) > 8 else session_id
     return f"session {short_id}"
+
+
+# --- Settings ---
+
+def get_settings(session_id: str | None = None) -> dict:
+    """Get settings for a session, with global defaults as fallback.
+
+    Returns dict with: intro_sound (bool), speed (float), voice (str)
+    """
+    with get_connection() as conn:
+        # Get global defaults
+        cursor = conn.execute(
+            "SELECT intro_sound, speed, voice FROM settings WHERE session_id = '__global__'"
+        )
+        row = cursor.fetchone()
+        if row:
+            settings = {
+                "intro_sound": bool(row["intro_sound"]),
+                "speed": float(row["speed"]),
+                "voice": row["voice"],
+            }
+        else:
+            settings = {"intro_sound": True, "speed": 1.0, "voice": "azelma"}
+
+        # Override with session-specific settings if they exist
+        if session_id and session_id != "__global__":
+            cursor = conn.execute(
+                "SELECT intro_sound, speed, voice FROM settings WHERE session_id = ?",
+                (session_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                if row["intro_sound"] is not None:
+                    settings["intro_sound"] = bool(row["intro_sound"])
+                if row["speed"] is not None:
+                    settings["speed"] = float(row["speed"])
+                if row["voice"] is not None:
+                    settings["voice"] = row["voice"]
+
+        return settings
+
+
+def set_settings(
+    session_id: str | None = None,
+    intro_sound: bool | None = None,
+    speed: float | None = None,
+    voice: str | None = None,
+) -> None:
+    """Set settings for a session (or global if session_id is None)."""
+    target = session_id or "__global__"
+
+    with get_connection() as conn:
+        # Check if row exists
+        cursor = conn.execute(
+            "SELECT 1 FROM settings WHERE session_id = ?", (target,)
+        )
+        exists = cursor.fetchone() is not None
+
+        if exists:
+            # Update existing
+            updates = []
+            values = []
+            if intro_sound is not None:
+                updates.append("intro_sound = ?")
+                values.append(int(intro_sound))
+            if speed is not None:
+                updates.append("speed = ?")
+                values.append(speed)
+            if voice is not None:
+                updates.append("voice = ?")
+                values.append(voice)
+
+            if updates:
+                values.append(target)
+                conn.execute(
+                    f"UPDATE settings SET {', '.join(updates)} WHERE session_id = ?",
+                    values
+                )
+        else:
+            # Insert new
+            conn.execute(
+                """
+                INSERT INTO settings (session_id, intro_sound, speed, voice)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    target,
+                    int(intro_sound) if intro_sound is not None else 1,
+                    speed if speed is not None else 1.0,
+                    voice if voice is not None else "azelma",
+                )
+            )
+
+        conn.commit()
+
+
+def get_all_sessions() -> list[dict]:
+    """Get all sessions with their message counts and last activity."""
+    with get_connection() as conn:
+        cursor = conn.execute("""
+            SELECT
+                session_id,
+                COUNT(*) as total_messages,
+                SUM(CASE WHEN played_at IS NULL THEN 1 ELSE 0 END) as pending,
+                MAX(created_at) as last_activity
+            FROM queue
+            GROUP BY session_id
+            ORDER BY last_activity DESC
+        """)
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def get_history(session_id: str | None = None, limit: int = 100) -> list[dict]:
+    """Get message history, optionally filtered by session."""
+    with get_connection() as conn:
+        if session_id:
+            cursor = conn.execute(
+                """
+                SELECT id, session_id, text, audio_path, created_at, played_at
+                FROM queue
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_id, limit)
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT id, session_id, text, audio_path, created_at, played_at
+                FROM queue
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            )
+        return [dict(row) for row in cursor.fetchall()]
