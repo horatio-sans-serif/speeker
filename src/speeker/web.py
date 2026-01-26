@@ -6,7 +6,8 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
-from .queue_db import get_all_sessions, get_history, get_settings, set_settings
+from .config import is_semantic_search_enabled
+from .queue_db import get_history, get_settings, set_settings, search
 
 router = APIRouter()
 
@@ -26,38 +27,65 @@ HTML_TEMPLATE = """
             background: #1a1a2e;
             color: #eee;
         }
-        h1 { color: #00d9ff; margin-bottom: 10px; }
-        h2 { color: #888; font-weight: normal; margin-top: 0; }
-        .sessions {
+        .header {
             display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
+            align-items: baseline;
+            justify-content: space-between;
             margin-bottom: 20px;
         }
-        .session-btn {
-            padding: 8px 16px;
+        .header-left {
+            display: flex;
+            align-items: baseline;
+            gap: 15px;
+        }
+        h1 {
+            color: #00d9ff;
+            margin: 0;
+        }
+        .subtitle {
+            color: #888;
+            font-size: 1em;
+        }
+        .search-box {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .search-box input[type="text"] {
+            padding: 8px 12px;
             border: 1px solid #333;
             background: #252540;
             color: #eee;
-            border-radius: 20px;
+            border-radius: 4px;
+            width: 250px;
+            font-size: 14px;
+        }
+        .search-box input[type="text"]:focus {
+            outline: none;
+            border-color: #00d9ff;
+        }
+        .search-box input[type="text"]::placeholder {
+            color: #666;
+        }
+        .search-box button {
+            padding: 8px 16px;
+            background: #00d9ff;
+            color: #000;
+            border: none;
+            border-radius: 4px;
             cursor: pointer;
-            text-decoration: none;
-            transition: all 0.2s;
+            font-size: 14px;
         }
-        .session-btn:hover { background: #353560; border-color: #00d9ff; }
-        .session-btn.active { background: #00d9ff; color: #000; }
-        .session-btn .count {
-            background: #333;
-            padding: 2px 8px;
-            border-radius: 10px;
-            margin-left: 8px;
-            font-size: 0.85em;
+        .search-box button:hover {
+            background: #00b8d4;
         }
-        .session-btn.active .count { background: rgba(0,0,0,0.2); }
+        .search-mode {
+            color: #666;
+            font-size: 0.8em;
+        }
         table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 20px;
         }
         th, td {
             padding: 12px;
@@ -67,14 +95,12 @@ HTML_TEMPLATE = """
         th { color: #888; font-weight: normal; }
         tr:hover { background: #252540; }
         .text-cell {
-            max-width: 500px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .text-cell:hover {
-            white-space: normal;
+            font-size: 0.85em;
+            max-height: 10em;
+            overflow-y: auto;
+            white-space: pre-wrap;
             word-break: break-word;
+            line-height: 1.4;
         }
         .play-btn {
             background: #00d9ff;
@@ -87,7 +113,8 @@ HTML_TEMPLATE = """
         }
         .play-btn:hover { background: #00b8d4; }
         .play-btn:disabled { background: #555; color: #888; cursor: not-allowed; }
-        .time { color: #888; font-size: 0.9em; }
+        .time { color: #888; font-size: 0.9em; white-space: nowrap; }
+        .session { color: #888; font-size: 0.85em; font-family: monospace; }
         .status {
             display: inline-block;
             padding: 2px 8px;
@@ -96,42 +123,29 @@ HTML_TEMPLATE = """
         }
         .status.played { background: #1b5e20; color: #a5d6a7; }
         .status.pending { background: #e65100; color: #ffcc80; }
-        .settings-form {
-            background: #252540;
-            padding: 20px;
-            border-radius: 8px;
-            margin-top: 20px;
+        .score {
+            color: #00d9ff;
+            font-size: 0.8em;
         }
-        .settings-form label {
-            display: block;
-            margin-bottom: 15px;
-        }
-        .settings-form input, .settings-form select {
-            margin-left: 10px;
-            padding: 5px;
-            background: #1a1a2e;
-            border: 1px solid #333;
-            color: #eee;
-            border-radius: 4px;
-        }
-        .settings-form button {
-            background: #00d9ff;
-            color: #000;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 4px;
-            cursor: pointer;
+        .no-results {
+            text-align: center;
+            color: #666;
+            padding: 40px;
         }
         audio { display: none; }
     </style>
 </head>
 <body>
-    <h1>Speeker</h1>
-    <h2>TTS Queue History</h2>
-
-    <div class="sessions">
-        <a href="/" class="session-btn {all_active}">All <span class="count">{total_count}</span></a>
-        {session_buttons}
+    <div class="header">
+        <div class="header-left">
+            <h1>Speeker</h1>
+            <span class="subtitle">TTS Queue History</span>
+        </div>
+        <form class="search-box" method="GET" action="/">
+            <input type="text" name="q" placeholder="Search..." value="{query}">
+            <button type="submit">Search</button>
+            <span class="search-mode">{search_mode}</span>
+        </form>
     </div>
 
     <table>
@@ -174,26 +188,34 @@ def format_time(iso_str: str | None) -> str:
         return iso_str
 
 
-@router.get("/", response_class=HTMLResponse)
-async def index(session: str | None = None):
-    """Main page showing queue history."""
-    sessions = get_all_sessions()
-    history = get_history(session_id=session, limit=200)
+def escape_html(text: str) -> str:
+    """Escape text for HTML display."""
+    return (
+        text.replace('&', '&amp;')
+        .replace('<', '&lt;')
+        .replace('>', '&gt;')
+        .replace('"', '&quot;')
+    )
 
-    # Build session buttons
-    total_count = sum(s["total_messages"] for s in sessions)
-    session_buttons = []
-    for s in sessions:
-        active = "active" if session == s["session_id"] else ""
-        short_id = s["session_id"][:8] if len(s["session_id"]) > 8 else s["session_id"]
-        session_buttons.append(
-            f'<a href="/?session={s["session_id"]}" class="session-btn {active}">'
-            f'{short_id} <span class="count">{s["total_messages"]}</span></a>'
-        )
+
+@router.get("/", response_class=HTMLResponse)
+async def index(q: str | None = None):
+    """Main page showing queue history with search."""
+    # Determine search mode
+    semantic_enabled = is_semantic_search_enabled()
+    search_mode = "semantic" if semantic_enabled else "fuzzy"
+
+    # Get items
+    if q and q.strip():
+        items = search(q.strip(), limit=200)
+        show_score = True
+    else:
+        items = get_history(limit=200)
+        show_score = False
 
     # Build table rows
     rows = []
-    for item in history:
+    for item in items:
         short_session = item["session_id"][:8] if len(item["session_id"]) > 8 else item["session_id"]
         status_class = "played" if item["played_at"] else "pending"
         status_text = "Played" if item["played_at"] else "Pending"
@@ -205,24 +227,26 @@ async def index(session: str | None = None):
             else '<button class="play-btn" disabled>No audio</button>'
         )
 
-        # Escape text for HTML
-        text_escaped = item['text'].replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+        text_escaped = escape_html(item['text'])
+
+        # Show score if searching
+        score_html = ""
+        if show_score and "score" in item:
+            score_html = f' <span class="score">({item["score"]:.2f})</span>'
 
         rows.append(f"""
             <tr>
-                <td>{short_session}</td>
-                <td class="text-cell" title="{text_escaped}">{text_escaped}</td>
+                <td class="session">{short_session}</td>
+                <td class="text-cell">{text_escaped}</td>
                 <td class="time">{format_time(item['created_at'])}</td>
-                <td><span class="status {status_class}">{status_text}</span></td>
+                <td><span class="status {status_class}">{status_text}</span>{score_html}</td>
                 <td>{play_btn}</td>
             </tr>
         """)
 
-    # Use % formatting to avoid issues with CSS braces
-    html = HTML_TEMPLATE.replace("{all_active}", "active" if session is None else "")
-    html = html.replace("{total_count}", str(total_count))
-    html = html.replace("{session_buttons}", " ".join(session_buttons))
-    html = html.replace("{rows}", "\n".join(rows) if rows else "<tr><td colspan='5'>No messages yet</td></tr>")
+    html = HTML_TEMPLATE.replace("{query}", escape_html(q) if q else "")
+    html = html.replace("{search_mode}", search_mode)
+    html = html.replace("{rows}", "\n".join(rows) if rows else '<tr><td colspan="5" class="no-results">No messages yet</td></tr>')
 
     return HTMLResponse(content=html)
 
