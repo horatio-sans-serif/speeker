@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
-from .config import is_semantic_search_enabled
 from .queue_db import get_history, get_settings, set_settings, search
 
 router = APIRouter()
@@ -46,11 +45,6 @@ HTML_TEMPLATE = """
             color: rgba(255, 255, 255, 0.5);
             font-size: 1em;
         }
-        .search-box {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
         .search-box input[type="text"] {
             padding: 8px 12px;
             border: 1px solid #222;
@@ -66,22 +60,6 @@ HTML_TEMPLATE = """
         }
         .search-box input[type="text"]::placeholder {
             color: rgba(255, 255, 255, 0.3);
-        }
-        .search-box button {
-            padding: 8px 16px;
-            background: #00d9ff;
-            color: #000;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-        .search-box button:hover {
-            background: #00b8d4;
-        }
-        .search-mode {
-            color: rgba(255, 255, 255, 0.4);
-            font-size: 0.8em;
         }
         table {
             width: 100%;
@@ -191,11 +169,9 @@ HTML_TEMPLATE = """
             <h1>Speeker</h1>
             <span class="subtitle">TTS Queue History</span>
         </div>
-        <form class="search-box" method="GET" action="/">
-            <input type="text" name="q" placeholder="Search..." value="{query}">
-            <button type="submit">Search</button>
-            <span class="search-mode">{search_mode}</span>
-        </form>
+        <div class="search-box">
+            <input type="text" id="search" placeholder="Search..." value="{query}">
+        </div>
     </div>
 
     <table>
@@ -221,6 +197,18 @@ HTML_TEMPLATE = """
             player.src = '/audio/' + id;
             player.play();
         }
+
+        // Debounced search
+        let searchTimeout;
+        const searchInput = document.getElementById('search');
+        searchInput.addEventListener('keyup', function() {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                const q = searchInput.value.trim();
+                const url = q ? '/?q=' + encodeURIComponent(q) : '/';
+                window.location.href = url;
+            }, 300);
+        });
     </script>
 </body>
 </html>
@@ -292,10 +280,6 @@ def render_metadata(metadata: dict | None) -> str:
 @router.get("/", response_class=HTMLResponse)
 async def index(q: str | None = None):
     """Main page showing queue history with search."""
-    # Determine search mode
-    semantic_enabled = is_semantic_search_enabled()
-    search_mode = "semantic" if semantic_enabled else "fuzzy"
-
     # Get items
     if q and q.strip():
         items = search(q.strip(), limit=200)
@@ -338,7 +322,6 @@ async def index(q: str | None = None):
         """)
 
     html = HTML_TEMPLATE.replace("{query}", escape_html(q) if q else "")
-    html = html.replace("{search_mode}", search_mode)
     html = html.replace("{rows}", "\n".join(rows) if rows else '<tr><td colspan="5" class="no-results">No messages yet</td></tr>')
 
     return HTMLResponse(content=html)
