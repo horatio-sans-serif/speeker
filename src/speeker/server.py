@@ -8,11 +8,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from .queue_db import enqueue, get_pending_count
+from .queue_db import enqueue, get_pending_count, get_settings, set_settings, get_all_sessions, get_history
 from .cli import start_player
 from .summarize import summarize_for_speech, get_backend_info
+from .web import router as web_router
 
 
 class SpeakRequest(BaseModel):
@@ -69,6 +71,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Speeker TTS Server", lifespan=lifespan)
+
+# Mount web UI
+app.include_router(web_router)
 
 
 @app.post("/speak", response_model=SpeakResponse)
