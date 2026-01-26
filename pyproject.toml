@@ -1,6 +1,6 @@
 [project]
 name = "speeker"
-version = "1.2.0"
+version = "1.4.0"
 description = "Text-to-speech CLI with multiple engines and voice options"
 requires-python = ">=3.11"
 dependencies = [
@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 test = [
     "faster-whisper>=1.2.1",
+]
+semantic = [
+    "sentence-transformers>=2.2.0",
 ]
 
 [project.scripts]

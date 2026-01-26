@@ -7,8 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
+import numpy as np
+
+from .config import is_semantic_search_enabled, get_embedding_model
+
 # Default database location
 DEFAULT_DB_PATH = Path.home() / ".speeker" / "queue.db"
+
+# Lazy-loaded embedding model
+_embedding_model = None
+_embedding_lock = threading.Lock()
 
 # Thread-local storage for connections
 _local = threading.local()
@@ -66,6 +74,13 @@ def _init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_session ON queue(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_played ON queue(played_at)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS embeddings (
+            queue_id INTEGER PRIMARY KEY,
+            embedding BLOB NOT NULL,
+            FOREIGN KEY (queue_id) REFERENCES queue(id) ON DELETE CASCADE
+        )
+    """)
     conn.commit()
 
     # Ensure global defaults exist (use a separate try/except to avoid lock issues)
@@ -77,6 +92,37 @@ def _init_db(conn: sqlite3.Connection) -> None:
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Already exists or locked, that's fine
+
+
+def _get_embedding_model():
+    """Lazy-load the embedding model."""
+    global _embedding_model
+    with _embedding_lock:
+        if _embedding_model is None:
+            from sentence_transformers import SentenceTransformer
+            model_name = get_embedding_model()
+            _embedding_model = SentenceTransformer(model_name)
+        return _embedding_model
+
+
+def _generate_embedding(text: str) -> bytes | None:
+    """Generate embedding for text if semantic search is enabled."""
+    if not is_semantic_search_enabled():
+        return None
+    try:
+        model = _get_embedding_model()
+        embedding = model.encode(text, convert_to_numpy=True)
+        return embedding.astype(np.float32).tobytes()
+    except Exception:
+        return None
+
+
+def _store_embedding(conn: sqlite3.Connection, queue_id: int, embedding: bytes) -> None:
+    """Store embedding for a queue item."""
+    conn.execute(
+        "INSERT OR REPLACE INTO embeddings (queue_id, embedding) VALUES (?, ?)",
+        (queue_id, embedding)
+    )
 
 
 def enqueue(session_id: str, text: str, audio_path: str | Path | None = None) -> int:
@@ -94,8 +140,15 @@ def enqueue(session_id: str, text: str, audio_path: str | Path | None = None) ->
                 datetime.now(timezone.utc).isoformat(),
             ),
         )
+        queue_id = cursor.lastrowid or 0
+
+        # Generate and store embedding if enabled
+        embedding = _generate_embedding(text)
+        if embedding:
+            _store_embedding(conn, queue_id, embedding)
+
         conn.commit()
-        return cursor.lastrowid or 0
+        return queue_id
 
 
 def get_sessions_with_pending() -> list[str]:
@@ -362,3 +415,106 @@ def get_history(session_id: str | None = None, limit: int = 100) -> list[dict]:
                 (limit,)
             )
         return [dict(row) for row in cursor.fetchall()]
+
+
+# --- Search ---
+
+def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
+    """Compute cosine similarity between two vectors."""
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
+
+
+def search_semantic(query: str, limit: int = 50) -> list[dict]:
+    """Search using semantic similarity. Returns items sorted by relevance."""
+    if not is_semantic_search_enabled():
+        return []
+
+    query_embedding = _generate_embedding(query)
+    if not query_embedding:
+        return []
+
+    query_vec = np.frombuffer(query_embedding, dtype=np.float32)
+
+    with get_connection() as conn:
+        # Get all items with embeddings
+        cursor = conn.execute("""
+            SELECT q.id, q.session_id, q.text, q.audio_path, q.created_at, q.played_at, e.embedding
+            FROM queue q
+            JOIN embeddings e ON q.id = e.queue_id
+        """)
+
+        results = []
+        for row in cursor.fetchall():
+            item_vec = np.frombuffer(row["embedding"], dtype=np.float32)
+            similarity = _cosine_similarity(query_vec, item_vec)
+            results.append({
+                "id": row["id"],
+                "session_id": row["session_id"],
+                "text": row["text"],
+                "audio_path": row["audio_path"],
+                "created_at": row["created_at"],
+                "played_at": row["played_at"],
+                "score": similarity,
+            })
+
+        # Sort by similarity descending
+        results.sort(key=lambda x: x["score"], reverse=True)
+        return results[:limit]
+
+
+def search_fuzzy(query: str, limit: int = 50) -> list[dict]:
+    """Search using fuzzy text matching on session_id and text."""
+    query_lower = query.lower()
+    query_parts = query_lower.split()
+
+    with get_connection() as conn:
+        cursor = conn.execute("""
+            SELECT id, session_id, text, audio_path, created_at, played_at
+            FROM queue
+            ORDER BY created_at DESC
+        """)
+
+        results = []
+        for row in cursor.fetchall():
+            text_lower = row["text"].lower()
+            session_lower = row["session_id"].lower()
+
+            # Score based on matches
+            score = 0.0
+
+            # Exact substring match in text
+            if query_lower in text_lower:
+                score += 1.0
+
+            # Exact substring match in session
+            if query_lower in session_lower:
+                score += 0.5
+
+            # Partial word matches
+            for part in query_parts:
+                if part in text_lower:
+                    score += 0.3
+                if part in session_lower:
+                    score += 0.2
+
+            if score > 0:
+                results.append({
+                    "id": row["id"],
+                    "session_id": row["session_id"],
+                    "text": row["text"],
+                    "audio_path": row["audio_path"],
+                    "created_at": row["created_at"],
+                    "played_at": row["played_at"],
+                    "score": score,
+                })
+
+        # Sort by score descending, then by created_at descending
+        results.sort(key=lambda x: (-x["score"], x["created_at"]), reverse=False)
+        return results[:limit]
+
+
+def search(query: str, limit: int = 50) -> list[dict]:
+    """Search queue history. Uses semantic search if enabled, else fuzzy search."""
+    if is_semantic_search_enabled():
+        return search_semantic(query, limit)
+    return search_fuzzy(query, limit)
