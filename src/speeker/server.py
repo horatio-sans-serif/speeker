@@ -7,8 +7,7 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
 from .queue_db import enqueue, get_pending_count, get_settings, set_settings, get_all_sessions, get_history
@@ -17,9 +16,22 @@ from .summarize import summarize_for_speech, get_backend_info
 from .web import router as web_router
 
 
+def extract_metadata(request: Request) -> dict | None:
+    """Extract metadata from query params with ! prefix.
+
+    e.g., ?!foo=bar&!session=abc -> {"foo": "bar", "session": "abc"}
+    """
+    metadata = {}
+    for key, value in request.query_params.items():
+        if key.startswith("!"):
+            metadata[key[1:]] = value
+    return metadata if metadata else None
+
+
 class SpeakRequest(BaseModel):
     text: str
-    session_id: str = "default"
+    metadata: dict | None = None
+    session_id: str | None = None  # Deprecated
 
 
 class SpeakResponse(BaseModel):
@@ -32,7 +44,8 @@ class SpeakResponse(BaseModel):
 
 class SummarizeRequest(BaseModel):
     text: str
-    session_id: str = "default"
+    metadata: dict | None = None
+    session_id: str | None = None  # Deprecated
 
 
 class SummarizeResponse(BaseModel):
@@ -77,15 +90,31 @@ app.include_router(web_router)
 
 
 @app.post("/speak", response_model=SpeakResponse)
-async def speak(request: SpeakRequest):
-    """Queue text for TTS playback."""
-    text = request.text.strip()
+async def speak(body: SpeakRequest, request: Request):
+    """Queue text for TTS playback.
+
+    Accepts metadata via:
+    - JSON body: {"text": "...", "metadata": {"key": "value"}}
+    - Query params: ?!key=value&!another=thing
+    Query params are merged with body metadata (query params take precedence).
+    """
+    text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     try:
+        # Merge metadata from body and query params
+        metadata = body.metadata.copy() if body.metadata else {}
+        query_metadata = extract_metadata(request)
+        if query_metadata:
+            metadata.update(query_metadata)
+
+        # Handle deprecated session_id
+        if body.session_id and "session" not in metadata:
+            metadata["session"] = body.session_id
+
         # Queue the text for playback
-        queue_id = enqueue(request.session_id, text)
+        queue_id = enqueue(text, metadata=metadata if metadata else None)
 
         # Start player if not running
         start_player()
@@ -105,22 +134,34 @@ async def speak(request: SpeakRequest):
 
 
 @app.post("/summarize", response_model=SummarizeResponse)
-async def summarize_and_speak(request: SummarizeRequest):
+async def summarize_and_speak(body: SummarizeRequest, request: Request):
     """Summarize text and queue for TTS playback.
 
     Uses configured LLM backend to generate a short, speakable summary.
     Falls back to heuristic extraction if no LLM is configured.
+
+    Accepts metadata via query params: ?!key=value
     """
-    text = request.text.strip()
+    text = body.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="Text cannot be empty")
 
     try:
+        # Merge metadata from body and query params
+        metadata = body.metadata.copy() if body.metadata else {}
+        query_metadata = extract_metadata(request)
+        if query_metadata:
+            metadata.update(query_metadata)
+
+        # Handle deprecated session_id
+        if body.session_id and "session" not in metadata:
+            metadata["session"] = body.session_id
+
         # Generate summary
         summary = summarize_for_speech(text)
 
         # Queue the summary for playback
-        queue_id = enqueue(request.session_id, summary)
+        queue_id = enqueue(summary, metadata=metadata if metadata else None)
 
         # Start player if not running
         start_player()

@@ -24,8 +24,8 @@ HTML_TEMPLATE = """
             max-width: 1200px;
             margin: 0 auto;
             padding: 20px;
-            background: #1a1a2e;
-            color: #eee;
+            background: #0a0a0f;
+            color: rgba(255, 255, 255, 0.75);
         }
         .header {
             display: flex;
@@ -43,7 +43,7 @@ HTML_TEMPLATE = """
             margin: 0;
         }
         .subtitle {
-            color: #888;
+            color: rgba(255, 255, 255, 0.5);
             font-size: 1em;
         }
         .search-box {
@@ -53,9 +53,9 @@ HTML_TEMPLATE = """
         }
         .search-box input[type="text"] {
             padding: 8px 12px;
-            border: 1px solid #333;
-            background: #252540;
-            color: #eee;
+            border: 1px solid #222;
+            background: #151520;
+            color: rgba(255, 255, 255, 0.75);
             border-radius: 4px;
             width: 250px;
             font-size: 14px;
@@ -65,7 +65,7 @@ HTML_TEMPLATE = """
             border-color: #00d9ff;
         }
         .search-box input[type="text"]::placeholder {
-            color: #666;
+            color: rgba(255, 255, 255, 0.3);
         }
         .search-box button {
             padding: 8px 16px;
@@ -80,7 +80,7 @@ HTML_TEMPLATE = """
             background: #00b8d4;
         }
         .search-mode {
-            color: #666;
+            color: rgba(255, 255, 255, 0.4);
             font-size: 0.8em;
         }
         table {
@@ -90,10 +90,15 @@ HTML_TEMPLATE = """
         th, td {
             padding: 12px;
             text-align: left;
-            border-bottom: 1px solid #333;
+            border-bottom: 1px solid #1a1a25;
         }
-        th { color: #888; font-weight: normal; }
-        tr:hover { background: #252540; }
+        th {
+            color: rgba(255, 255, 255, 0.5);
+            font-weight: normal;
+        }
+        tr:hover {
+            background: #101018;
+        }
         .text-cell {
             font-size: 0.85em;
             max-height: 10em;
@@ -101,6 +106,34 @@ HTML_TEMPLATE = """
             white-space: pre-wrap;
             word-break: break-word;
             line-height: 1.4;
+        }
+        .data-cell details {
+            font-size: 0.8em;
+        }
+        .data-cell summary {
+            cursor: pointer;
+            color: rgba(255, 255, 255, 0.5);
+            font-family: monospace;
+        }
+        .data-cell summary:hover {
+            color: rgba(255, 255, 255, 0.75);
+        }
+        .data-cell table {
+            margin-top: 8px;
+            font-size: 0.9em;
+        }
+        .data-cell table td {
+            padding: 4px 8px;
+            border-bottom: 1px solid #1a1a25;
+        }
+        .data-cell .key {
+            color: rgba(255, 255, 255, 0.5);
+            font-family: monospace;
+        }
+        .data-cell .value {
+            color: rgba(255, 255, 255, 0.75);
+            font-family: monospace;
+            word-break: break-all;
         }
         .play-btn {
             background: #00d9ff;
@@ -112,25 +145,42 @@ HTML_TEMPLATE = """
             font-size: 14px;
         }
         .play-btn:hover { background: #00b8d4; }
-        .play-btn:disabled { background: #555; color: #888; cursor: not-allowed; }
-        .time { color: #888; font-size: 0.9em; white-space: nowrap; }
-        .session { color: #888; font-size: 0.85em; font-family: monospace; }
+        .play-btn:disabled {
+            background: #222;
+            color: rgba(255, 255, 255, 0.3);
+            cursor: not-allowed;
+        }
+        .time {
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 0.9em;
+            white-space: nowrap;
+        }
         .status {
             display: inline-block;
             padding: 2px 8px;
             border-radius: 10px;
             font-size: 0.85em;
         }
-        .status.played { background: #1b5e20; color: #a5d6a7; }
-        .status.pending { background: #e65100; color: #ffcc80; }
+        .status.played {
+            background: #0d2818;
+            color: #4ade80;
+        }
+        .status.pending {
+            background: #2d1a0a;
+            color: #fb923c;
+        }
         .score {
             color: #00d9ff;
             font-size: 0.8em;
         }
         .no-results {
             text-align: center;
-            color: #666;
+            color: rgba(255, 255, 255, 0.4);
             padding: 40px;
+        }
+        .no-data {
+            color: rgba(255, 255, 255, 0.3);
+            font-style: italic;
         }
         audio { display: none; }
     </style>
@@ -151,7 +201,7 @@ HTML_TEMPLATE = """
     <table>
         <thead>
             <tr>
-                <th>Session</th>
+                <th>Data</th>
                 <th>Text</th>
                 <th>Created</th>
                 <th>Status</th>
@@ -198,6 +248,47 @@ def escape_html(text: str) -> str:
     )
 
 
+def sanitize_key(key: str) -> str:
+    """Sanitize metadata key for display."""
+    return escape_html(str(key))
+
+
+def sanitize_value(value) -> str:
+    """Sanitize metadata value for display."""
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        import json
+        return escape_html(json.dumps(value, default=str))
+    return escape_html(str(value))
+
+
+def render_metadata(metadata: dict | None) -> str:
+    """Render metadata as a details/summary element with key-value table."""
+    if not metadata:
+        return '<span class="no-data">-</span>'
+
+    # Create summary text (first key or count)
+    if len(metadata) == 1:
+        key = list(metadata.keys())[0]
+        summary_text = f"{sanitize_key(key)[:12]}"
+    else:
+        summary_text = f"{len(metadata)} items"
+
+    # Build key-value table
+    rows = []
+    for key, value in metadata.items():
+        rows.append(
+            f'<tr><td class="key">{sanitize_key(key)}</td>'
+            f'<td class="value">{sanitize_value(value)}</td></tr>'
+        )
+
+    return f'''<details>
+        <summary>{summary_text}</summary>
+        <table>{"".join(rows)}</table>
+    </details>'''
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(q: str | None = None):
     """Main page showing queue history with search."""
@@ -216,7 +307,6 @@ async def index(q: str | None = None):
     # Build table rows
     rows = []
     for item in items:
-        short_session = item["session_id"][:8] if len(item["session_id"]) > 8 else item["session_id"]
         status_class = "played" if item["played_at"] else "pending"
         status_text = "Played" if item["played_at"] else "Pending"
         has_audio = bool(item["audio_path"]) and Path(item["audio_path"]).exists() if item["audio_path"] else False
@@ -234,9 +324,12 @@ async def index(q: str | None = None):
         if show_score and "score" in item:
             score_html = f' <span class="score">({item["score"]:.2f})</span>'
 
+        # Render metadata
+        metadata_html = render_metadata(item.get("metadata"))
+
         rows.append(f"""
             <tr>
-                <td class="session">{short_session}</td>
+                <td class="data-cell">{metadata_html}</td>
                 <td class="text-cell">{text_escaped}</td>
                 <td class="time">{format_time(item['created_at'])}</td>
                 <td><span class="status {status_class}">{status_text}</span>{score_html}</td>
@@ -281,14 +374,28 @@ async def settings_page(session: str | None = None):
                 max-width: 600px;
                 margin: 50px auto;
                 padding: 20px;
-                background: #1a1a2e;
-                color: #eee;
+                background: #0a0a0f;
+                color: rgba(255, 255, 255, 0.75);
             }}
             h1 {{ color: #00d9ff; }}
-            form {{ background: #252540; padding: 20px; border-radius: 8px; }}
+            form {{ background: #151520; padding: 20px; border-radius: 8px; }}
             label {{ display: block; margin-bottom: 15px; }}
-            input, select {{ margin-left: 10px; padding: 5px; background: #1a1a2e; border: 1px solid #333; color: #eee; border-radius: 4px; }}
-            button {{ background: #00d9ff; color: #000; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }}
+            input, select {{
+                margin-left: 10px;
+                padding: 5px;
+                background: #0a0a0f;
+                border: 1px solid #222;
+                color: rgba(255, 255, 255, 0.75);
+                border-radius: 4px;
+            }}
+            button {{
+                background: #00d9ff;
+                color: #000;
+                border: none;
+                padding: 10px 20px;
+                border-radius: 4px;
+                cursor: pointer;
+            }}
             a {{ color: #00d9ff; }}
         </style>
     </head>
