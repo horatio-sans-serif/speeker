@@ -10,7 +10,7 @@ from typing import Iterator
 
 import numpy as np
 
-from .config import is_semantic_search_enabled, get_embedding_model
+from .config import is_semantic_search_enabled, get_embedding_model, get_embedding_cache_dir
 
 # Default database location
 DEFAULT_DB_PATH = Path.home() / ".speeker" / "queue.db"
@@ -108,7 +108,8 @@ def _get_embedding_model():
         if _embedding_model is None:
             from sentence_transformers import SentenceTransformer
             model_name = get_embedding_model()
-            _embedding_model = SentenceTransformer(model_name)
+            cache_dir = get_embedding_cache_dir()
+            _embedding_model = SentenceTransformer(model_name, cache_folder=cache_dir)
         return _embedding_model
 
 

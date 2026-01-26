@@ -10,6 +10,7 @@ DEFAULT_CONFIG = {
     "semantic_search": {
         "enabled": False,
         "model": "all-MiniLM-L6-v2",
+        "cache_dir": None,  # None = default (~/.cache), or set to "/tmp/speeker-models"
     },
 }
 
@@ -54,3 +55,9 @@ def get_embedding_model() -> str:
     """Get the configured embedding model name."""
     config = get_config()
     return config.get("semantic_search", {}).get("model", "all-MiniLM-L6-v2")
+
+
+def get_embedding_cache_dir() -> str | None:
+    """Get the configured cache directory for embedding models."""
+    config = get_config()
+    return config.get("semantic_search", {}).get("cache_dir")
