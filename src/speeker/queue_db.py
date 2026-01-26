@@ -1,5 +1,6 @@
-"""SQLite-based queue for TTS playback with per-session support."""
+"""SQLite-based queue for TTS playback with metadata support."""
 
+import json
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -55,9 +56,15 @@ def _init_db(conn: sqlite3.Connection) -> None:
             text TEXT NOT NULL,
             audio_path TEXT,
             created_at TEXT NOT NULL,
-            played_at TEXT
+            played_at TEXT,
+            metadata TEXT
         )
     """)
+    # Migration: add metadata column if missing (for existing databases)
+    try:
+        conn.execute("ALTER TABLE queue ADD COLUMN metadata TEXT")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS playback_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -125,19 +132,38 @@ def _store_embedding(conn: sqlite3.Connection, queue_id: int, embedding: bytes) 
     )
 
 
-def enqueue(session_id: str, text: str, audio_path: str | Path | None = None) -> int:
-    """Add an item to the queue. Returns the item ID."""
+def enqueue(
+    text: str,
+    metadata: dict | None = None,
+    audio_path: str | Path | None = None,
+    session_id: str | None = None,  # Deprecated, use metadata instead
+) -> int:
+    """Add an item to the queue. Returns the item ID.
+
+    Args:
+        text: The text to queue for TTS
+        metadata: Optional dict of key-value pairs to store with the item
+        audio_path: Optional path to pre-generated audio file
+        session_id: Deprecated - use metadata={'session': ...} instead
+    """
+    # Handle legacy session_id parameter
+    if session_id and not metadata:
+        metadata = {"session": session_id}
+    elif session_id and metadata and "session" not in metadata:
+        metadata["session"] = session_id
+
     with get_connection() as conn:
         cursor = conn.execute(
             """
-            INSERT INTO queue (session_id, text, audio_path, created_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO queue (session_id, text, audio_path, created_at, metadata)
+            VALUES (?, ?, ?, ?, ?)
             """,
             (
-                session_id,
+                metadata.get("session", "default") if metadata else "default",
                 text,
                 str(audio_path) if audio_path else None,
                 datetime.now(timezone.utc).isoformat(),
+                json.dumps(metadata) if metadata else None,
             ),
         )
         queue_id = cursor.lastrowid or 0
@@ -396,7 +422,7 @@ def get_history(session_id: str | None = None, limit: int = 100) -> list[dict]:
         if session_id:
             cursor = conn.execute(
                 """
-                SELECT id, session_id, text, audio_path, created_at, played_at
+                SELECT id, session_id, text, audio_path, created_at, played_at, metadata
                 FROM queue
                 WHERE session_id = ?
                 ORDER BY created_at DESC
@@ -407,14 +433,24 @@ def get_history(session_id: str | None = None, limit: int = 100) -> list[dict]:
         else:
             cursor = conn.execute(
                 """
-                SELECT id, session_id, text, audio_path, created_at, played_at
+                SELECT id, session_id, text, audio_path, created_at, played_at, metadata
                 FROM queue
                 ORDER BY created_at DESC
                 LIMIT ?
                 """,
                 (limit,)
             )
-        return [dict(row) for row in cursor.fetchall()]
+        results = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            # Parse metadata JSON
+            if item.get("metadata"):
+                try:
+                    item["metadata"] = json.loads(item["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    item["metadata"] = None
+            results.append(item)
+        return results
 
 
 # --- Search ---
@@ -438,7 +474,7 @@ def search_semantic(query: str, limit: int = 50) -> list[dict]:
     with get_connection() as conn:
         # Get all items with embeddings
         cursor = conn.execute("""
-            SELECT q.id, q.session_id, q.text, q.audio_path, q.created_at, q.played_at, e.embedding
+            SELECT q.id, q.session_id, q.text, q.audio_path, q.created_at, q.played_at, q.metadata, e.embedding
             FROM queue q
             JOIN embeddings e ON q.id = e.queue_id
         """)
@@ -447,6 +483,12 @@ def search_semantic(query: str, limit: int = 50) -> list[dict]:
         for row in cursor.fetchall():
             item_vec = np.frombuffer(row["embedding"], dtype=np.float32)
             similarity = _cosine_similarity(query_vec, item_vec)
+            metadata = None
+            if row["metadata"]:
+                try:
+                    metadata = json.loads(row["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
             results.append({
                 "id": row["id"],
                 "session_id": row["session_id"],
@@ -454,6 +496,7 @@ def search_semantic(query: str, limit: int = 50) -> list[dict]:
                 "audio_path": row["audio_path"],
                 "created_at": row["created_at"],
                 "played_at": row["played_at"],
+                "metadata": metadata,
                 "score": similarity,
             })
 
@@ -463,13 +506,13 @@ def search_semantic(query: str, limit: int = 50) -> list[dict]:
 
 
 def search_fuzzy(query: str, limit: int = 50) -> list[dict]:
-    """Search using fuzzy text matching on session_id and text."""
+    """Search using fuzzy text matching on text and metadata values."""
     query_lower = query.lower()
     query_parts = query_lower.split()
 
     with get_connection() as conn:
         cursor = conn.execute("""
-            SELECT id, session_id, text, audio_path, created_at, played_at
+            SELECT id, session_id, text, audio_path, created_at, played_at, metadata
             FROM queue
             ORDER BY created_at DESC
         """)
@@ -477,7 +520,17 @@ def search_fuzzy(query: str, limit: int = 50) -> list[dict]:
         results = []
         for row in cursor.fetchall():
             text_lower = row["text"].lower()
-            session_lower = row["session_id"].lower()
+
+            # Parse metadata
+            metadata = None
+            metadata_text = ""
+            if row["metadata"]:
+                try:
+                    metadata = json.loads(row["metadata"])
+                    # Concatenate all metadata values for searching
+                    metadata_text = " ".join(str(v).lower() for v in metadata.values())
+                except (json.JSONDecodeError, TypeError):
+                    pass
 
             # Score based on matches
             score = 0.0
@@ -486,15 +539,15 @@ def search_fuzzy(query: str, limit: int = 50) -> list[dict]:
             if query_lower in text_lower:
                 score += 1.0
 
-            # Exact substring match in session
-            if query_lower in session_lower:
+            # Exact substring match in metadata values
+            if query_lower in metadata_text:
                 score += 0.5
 
             # Partial word matches
             for part in query_parts:
                 if part in text_lower:
                     score += 0.3
-                if part in session_lower:
+                if part in metadata_text:
                     score += 0.2
 
             if score > 0:
@@ -505,6 +558,7 @@ def search_fuzzy(query: str, limit: int = 50) -> list[dict]:
                     "audio_path": row["audio_path"],
                     "created_at": row["created_at"],
                     "played_at": row["played_at"],
+                    "metadata": metadata,
                     "score": score,
                 })
 
