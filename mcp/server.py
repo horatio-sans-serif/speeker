@@ -18,11 +18,13 @@ SPEEKER_URL = os.environ.get("SPEEKER_URL", "http://127.0.0.1:7849")
 
 def get_default_queue() -> str:
     """Get the default queue name from the current project directory."""
-    # Use PWD env var (inherited from Claude Code) rather than cwd()
-    # which may differ in subprocess context
-    pwd = os.environ.get("PWD", "")
-    if pwd:
-        return Path(pwd).name or "default"
+    # Try Claude Code specific env vars first
+    for var in ["CLAUDE_PROJECT_DIR", "PROJECT_DIR", "PWD"]:
+        path = os.environ.get(var, "")
+        if path:
+            name = Path(path).name
+            if name and name != "mcp":  # Avoid MCP server's own directory
+                return name
     return Path.cwd().name or "default"
 
 mcp = FastMCP("speeker-tts")
@@ -88,7 +90,7 @@ def speak(
         return {"status": "error", "error": "Text cannot be empty"}
 
     data: dict[str, Any] = {"text": text}
-    metadata: dict[str, Any] = {"session": queue or get_default_queue()}
+    metadata: dict[str, Any] = {"queue": queue or get_default_queue()}
     if engine:
         metadata["engine"] = engine
     if voice:
@@ -134,7 +136,7 @@ def summarize_and_speak(
         return {"status": "error", "error": "Text cannot be empty"}
 
     data: dict[str, Any] = {"text": text}
-    metadata: dict[str, Any] = {"session": queue or get_default_queue()}
+    metadata: dict[str, Any] = {"queue": queue or get_default_queue()}
     if engine:
         metadata["engine"] = engine
     if voice:
