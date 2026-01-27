@@ -1,0 +1,8 @@
+[project]
+name = "speeker-mcp"
+version = "1.0.0"
+description = "MCP server for Speeker text-to-speech"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+]

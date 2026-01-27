@@ -24,6 +24,14 @@ from .voices import (
     get_voices,
     validate_voice,
 )
+from .voice_prefs import (
+    run_voice_prefs_server,
+    get_preferred_voice,
+    get_preferred_engine,
+    ensure_all_samples,
+    get_voice_prefs,
+    BUNDLED_PREFS_FILE,
+)
 
 if TYPE_CHECKING:
     from kokoro import KPipeline
@@ -462,6 +470,38 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voice_prefs(args: argparse.Namespace) -> int:
+    """Handle the voice-prefs command."""
+    run_voice_prefs_server(quiet=args.quiet)
+    return 0
+
+
+def cmd_generate_samples(args: argparse.Namespace) -> int:
+    """Handle the generate-samples command."""
+    print("Generating voice samples for all voices...", file=sys.stderr)
+    samples = ensure_all_samples(quiet=args.quiet)
+
+    total = sum(len(v) for v in samples.values())
+    print(f"Generated {total} voice samples.", file=sys.stderr)
+    return 0
+
+
+def cmd_bundle_prefs(args: argparse.Namespace) -> int:
+    """Handle the bundle-prefs command - copy user prefs to bundled defaults."""
+    prefs = get_voice_prefs()
+    if not prefs.get("pocket-tts") and not prefs.get("kokoro"):
+        print("No voice preferences found. Run 'speeker voice-prefs' first.", file=sys.stderr)
+        return 1
+
+    # Write to the bundled defaults file
+    import json
+    with open(BUNDLED_PREFS_FILE, "w") as f:
+        json.dump(prefs, f, indent=2)
+
+    print(f"Bundled preferences saved to: {BUNDLED_PREFS_FILE}", file=sys.stderr)
+    return 0
+
+
 def main() -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
@@ -508,6 +548,33 @@ def main() -> int:
     # status command
     status_parser = subparsers.add_parser("status", help="Show speeker status")
     status_parser.set_defaults(func=cmd_status)
+
+    # voice-prefs command
+    voice_prefs_parser = subparsers.add_parser(
+        "voice-prefs",
+        help="Open voice preferences UI to rank voices by preference"
+    )
+    voice_prefs_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress messages"
+    )
+    voice_prefs_parser.set_defaults(func=cmd_voice_prefs)
+
+    # generate-samples command
+    generate_samples_parser = subparsers.add_parser(
+        "generate-samples",
+        help="Generate voice samples for all voices (used by voice-prefs)"
+    )
+    generate_samples_parser.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress messages"
+    )
+    generate_samples_parser.set_defaults(func=cmd_generate_samples)
+
+    # bundle-prefs command (developer use)
+    bundle_prefs_parser = subparsers.add_parser(
+        "bundle-prefs",
+        help="Copy your voice preferences to bundled defaults (developer use)"
+    )
+    bundle_prefs_parser.set_defaults(func=cmd_bundle_prefs)
 
     args = parser.parse_args()
 

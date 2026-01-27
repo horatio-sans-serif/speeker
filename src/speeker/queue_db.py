@@ -76,9 +76,15 @@ def _init_db(conn: sqlite3.Connection) -> None:
             session_id TEXT PRIMARY KEY,
             intro_sound INTEGER DEFAULT 1,
             speed REAL DEFAULT 1.0,
-            voice TEXT DEFAULT 'azelma'
+            voice TEXT DEFAULT NULL,
+            engine TEXT DEFAULT NULL
         )
     """)
+    # Migration: add engine column if missing
+    try:
+        conn.execute("ALTER TABLE settings ADD COLUMN engine TEXT DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_session ON queue(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_played ON queue(played_at)")
     conn.execute("""
@@ -93,8 +99,8 @@ def _init_db(conn: sqlite3.Connection) -> None:
     # Ensure global defaults exist (use a separate try/except to avoid lock issues)
     try:
         conn.execute("""
-            INSERT OR IGNORE INTO settings (session_id, intro_sound, speed, voice)
-            VALUES ('__global__', 1, 1.0, 'azelma')
+            INSERT OR IGNORE INTO settings (session_id, intro_sound, speed, voice, engine)
+            VALUES ('__global__', 1, 1.0, NULL, NULL)
         """)
         conn.commit()
     except sqlite3.OperationalError:
@@ -312,27 +318,49 @@ def get_session_label(session_id: str) -> str:
 def get_settings(session_id: str | None = None) -> dict:
     """Get settings for a session, with global defaults as fallback.
 
-    Returns dict with: intro_sound (bool), speed (float), voice (str)
+    Returns dict with: intro_sound (bool), speed (float), voice (str), engine (str)
+
+    Settings cascade (highest to lowest priority):
+    1. Session-specific settings (from database)
+    2. Global settings (from database)
+    3. User voice preferences (from ~/.config/speeker/voice-prefs.json)
+    4. System defaults (pocket-tts, azelma)
     """
+    # Import here to avoid circular import
+    from .voice_prefs import get_preferred_voice, get_preferred_engine
+    from .voices import DEFAULT_POCKET_TTS_VOICE, DEFAULT_ENGINE
+
+    # Start with system defaults, then overlay user preferences
+    preferred_engine = get_preferred_engine() or DEFAULT_ENGINE
+    preferred_voice = get_preferred_voice(preferred_engine) or DEFAULT_POCKET_TTS_VOICE
+
+    settings = {
+        "intro_sound": True,
+        "speed": 1.0,
+        "voice": preferred_voice,
+        "engine": preferred_engine,
+    }
+
     with get_connection() as conn:
-        # Get global defaults
+        # Get global settings (overlay on preferences)
         cursor = conn.execute(
-            "SELECT intro_sound, speed, voice FROM settings WHERE session_id = '__global__'"
+            "SELECT intro_sound, speed, voice, engine FROM settings WHERE session_id = '__global__'"
         )
         row = cursor.fetchone()
         if row:
-            settings = {
-                "intro_sound": bool(row["intro_sound"]),
-                "speed": float(row["speed"]),
-                "voice": row["voice"],
-            }
-        else:
-            settings = {"intro_sound": True, "speed": 1.0, "voice": "azelma"}
+            if row["intro_sound"] is not None:
+                settings["intro_sound"] = bool(row["intro_sound"])
+            if row["speed"] is not None:
+                settings["speed"] = float(row["speed"])
+            if row["voice"] is not None:
+                settings["voice"] = row["voice"]
+            if row["engine"] is not None:
+                settings["engine"] = row["engine"]
 
         # Override with session-specific settings if they exist
         if session_id and session_id != "__global__":
             cursor = conn.execute(
-                "SELECT intro_sound, speed, voice FROM settings WHERE session_id = ?",
+                "SELECT intro_sound, speed, voice, engine FROM settings WHERE session_id = ?",
                 (session_id,)
             )
             row = cursor.fetchone()
@@ -343,6 +371,8 @@ def get_settings(session_id: str | None = None) -> dict:
                     settings["speed"] = float(row["speed"])
                 if row["voice"] is not None:
                     settings["voice"] = row["voice"]
+                if row["engine"] is not None:
+                    settings["engine"] = row["engine"]
 
         return settings
 
@@ -352,6 +382,7 @@ def set_settings(
     intro_sound: bool | None = None,
     speed: float | None = None,
     voice: str | None = None,
+    engine: str | None = None,
 ) -> None:
     """Set settings for a session (or global if session_id is None)."""
     target = session_id or "__global__"
@@ -376,6 +407,9 @@ def set_settings(
             if voice is not None:
                 updates.append("voice = ?")
                 values.append(voice)
+            if engine is not None:
+                updates.append("engine = ?")
+                values.append(engine)
 
             if updates:
                 values.append(target)
@@ -387,14 +421,15 @@ def set_settings(
             # Insert new
             conn.execute(
                 """
-                INSERT INTO settings (session_id, intro_sound, speed, voice)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO settings (session_id, intro_sound, speed, voice, engine)
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
                     target,
                     int(intro_sound) if intro_sound is not None else 1,
                     speed if speed is not None else 1.0,
-                    voice if voice is not None else "azelma",
+                    voice,
+                    engine,
                 )
             )
 
