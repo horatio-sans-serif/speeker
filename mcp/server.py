@@ -18,9 +18,12 @@ SPEEKER_URL = os.environ.get("SPEEKER_URL", "http://127.0.0.1:7849")
 
 def get_default_queue() -> str:
     """Get the default queue name from the current project directory."""
-    cwd = Path.cwd()
-    # Use the directory name as the queue name
-    return cwd.name or "default"
+    # Use PWD env var (inherited from Claude Code) rather than cwd()
+    # which may differ in subprocess context
+    pwd = os.environ.get("PWD", "")
+    if pwd:
+        return Path(pwd).name or "default"
+    return Path.cwd().name or "default"
 
 mcp = FastMCP("speeker-tts")
 
