@@ -1,0 +1,3 @@
+[submodule "lib/pytone"]
+	path = lib/pytone
+	url = https://github.com/horatio-sans-serif/pytone.git

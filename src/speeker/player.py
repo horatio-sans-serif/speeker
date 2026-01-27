@@ -53,113 +53,8 @@ _intro_sound_path: Path | None = None
 _outro_sound_path: Path | None = None
 _tone_cache: dict[str, Path] = {}
 
-# Note frequencies (A4 = 440 Hz standard tuning)
-# Formula: freq = 440 * 2^((n-49)/12) where n is the key number (A0=1, C4=40, A4=49)
-NOTE_SEMITONES = {
-    "C": -9, "D": -7, "E": -5, "F": -4, "G": -2, "A": 0, "B": 2
-}
-
-
-def note_to_frequency(note: str) -> float | None:
-    """Convert a note like 'Eb3' to frequency in Hz.
-
-    Format: [A-G][b/#]?[0-8]
-    Examples: C4=261.63, A4=440, Eb3=155.56
-    """
-    import re
-    match = re.match(r"^([A-Ga-g])([b#])?([0-8])$", note)
-    if not match:
-        return None
-
-    note_name = match.group(1).upper()
-    accidental = match.group(2)
-    octave = int(match.group(3))
-
-    # Calculate semitones from A4
-    semitones = NOTE_SEMITONES.get(note_name)
-    if semitones is None:
-        return None
-
-    # Adjust for accidental
-    if accidental == "b":
-        semitones -= 1
-    elif accidental == "#":
-        semitones += 1
-
-    # Adjust for octave (A4 is reference)
-    semitones += (octave - 4) * 12
-
-    # Calculate frequency: A4 = 440 Hz
-    return 440.0 * (2.0 ** (semitones / 12.0))
-
-
-def generate_single_tone(frequency: float, duration: float = 0.045) -> Path:
-    """Generate a single tone at the given frequency."""
-    import math
-    import struct
-    import wave
-
-    # Cache key based on frequency and duration
-    cache_key = f"{frequency:.2f}_{duration:.2f}"
-    if cache_key in _tone_cache and _tone_cache[cache_key].exists():
-        return _tone_cache[cache_key]
-
-    base_dir = get_base_dir()
-    tone_dir = base_dir / "tones"
-    tone_dir.mkdir(parents=True, exist_ok=True)
-    tone_path = tone_dir / f"tone_{cache_key}.wav"
-
-    if tone_path.exists():
-        _tone_cache[cache_key] = tone_path
-        return tone_path
-
-    sample_rate = 44100
-    amplitude = 0.5
-    n_samples = int(sample_rate * duration)
-    fade_samples = int(sample_rate * 0.005)  # 5ms fade for punchy beeps
-
-    samples = []
-    for i in range(n_samples):
-        t = i / sample_rate
-        # Envelope for smooth attack/release
-        if i < fade_samples:
-            envelope = i / fade_samples
-        elif i > n_samples - fade_samples:
-            envelope = (n_samples - i) / fade_samples
-        else:
-            envelope = 1.0
-        value = amplitude * envelope * math.sin(2 * math.pi * frequency * t)
-        samples.append(int(value * 32767))
-
-    with wave.open(str(tone_path), "w") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(struct.pack(f"{len(samples)}h", *samples))
-
-    _tone_cache[cache_key] = tone_path
-    return tone_path
-
-
-def extract_tone_tokens(text: str) -> tuple[list[str], str]:
-    """Extract $Note tokens from text and return (tokens, clean_text).
-
-    Example: "$Eb3 $Eb3 Hello world" -> (["Eb3", "Eb3"], "Hello world")
-    """
-    import re
-    tokens = []
-    # Match $[A-G][b#]?[0-8] at start of text (with optional spaces between)
-    pattern = r"^\s*\$([A-Ga-g][b#]?[0-8])"
-    remaining = text
-
-    while True:
-        match = re.match(pattern, remaining)
-        if not match:
-            break
-        tokens.append(match.group(1))
-        remaining = remaining[match.end():]
-
-    return tokens, remaining.strip()
+# Import tone synthesis from pytone
+from pytone import note_to_frequency, extract_tone_tokens, generate_tones, samples_to_wav
 
 
 def get_base_dir() -> Path:
@@ -389,14 +284,10 @@ def generate_tts(
         return None
 
 
-def generate_combined_tones(frequencies: list[float], duration: float = 0.045, gap: float = 0.08) -> Path:
-    """Generate a single WAV with multiple tones back-to-back."""
-    import math
-    import struct
-    import wave
-
+def generate_combined_tones(frequencies: list[float], duration: float = 0.8, gap: float = 0.06) -> Path:
+    """Generate a single WAV with multiple tones back-to-back using pytone."""
     # Cache key
-    cache_key = "_".join(f"{f:.0f}" for f in frequencies) + f"_{duration}_{gap}"
+    cache_key = "_".join(f"{f:.0f}" for f in frequencies) + f"_{duration}_{gap}_v5"
     if cache_key in _tone_cache and _tone_cache[cache_key].exists():
         return _tone_cache[cache_key]
 
@@ -409,33 +300,9 @@ def generate_combined_tones(frequencies: list[float], duration: float = 0.045, g
         _tone_cache[cache_key] = tone_path
         return tone_path
 
-    sample_rate = 44100
-    amplitude = 0.5
-    fade_samples = int(sample_rate * 0.005)
-    gap_samples = int(sample_rate * gap)
-
-    samples = []
-    for i, freq in enumerate(frequencies):
-        n_samples = int(sample_rate * duration)
-        for j in range(n_samples):
-            t = j / sample_rate
-            if j < fade_samples:
-                envelope = j / fade_samples
-            elif j > n_samples - fade_samples:
-                envelope = (n_samples - j) / fade_samples
-            else:
-                envelope = 1.0
-            value = amplitude * envelope * math.sin(2 * math.pi * freq * t)
-            samples.append(int(value * 32767))
-        # Add gap between tones (but not after the last one)
-        if i < len(frequencies) - 1:
-            samples.extend([0] * gap_samples)
-
-    with wave.open(str(tone_path), "w") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(struct.pack(f"{len(samples)}h", *samples))
+    # Use pytone for synthesis
+    samples = generate_tones(frequencies, duration=duration, gap=gap, style="vibraphone", reverb=True)
+    samples_to_wav(samples, tone_path)
 
     _tone_cache[cache_key] = tone_path
     return tone_path
@@ -474,7 +341,7 @@ def speak_text(
     tone_tokens, clean_text = extract_tone_tokens(text)
     if tone_tokens:
         play_tone_tokens(tone_tokens, verbose)
-        time.sleep(0.1)  # Pause between tones and speech
+        # No pause - start speaking immediately after tone
 
     # If only tones, nothing to speak
     if not clean_text:
