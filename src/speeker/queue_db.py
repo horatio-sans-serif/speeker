@@ -151,13 +151,13 @@ def enqueue(
         text: The text to queue for TTS
         metadata: Optional dict of key-value pairs to store with the item
         audio_path: Optional path to pre-generated audio file
-        session_id: Deprecated - use metadata={'session': ...} instead
+        session_id: Deprecated - use metadata={'queue': ...} instead
     """
-    # Handle legacy session_id parameter
+    # Handle legacy session_id parameter (maps to queue)
     if session_id and not metadata:
-        metadata = {"session": session_id}
-    elif session_id and metadata and "session" not in metadata:
-        metadata["session"] = session_id
+        metadata = {"queue": session_id}
+    elif session_id and metadata and "queue" not in metadata:
+        metadata["queue"] = session_id
 
     with get_connection() as conn:
         cursor = conn.execute(
@@ -166,7 +166,7 @@ def enqueue(
             VALUES (?, ?, ?, ?, ?)
             """,
             (
-                metadata.get("session", "default") if metadata else "default",
+                metadata.get("queue", "default") if metadata else "default",
                 text,
                 str(audio_path) if audio_path else None,
                 datetime.now(timezone.utc).isoformat(),

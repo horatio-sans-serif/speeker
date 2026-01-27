@@ -26,7 +26,7 @@ from .voices import (
 def extract_metadata(request: Request) -> dict | None:
     """Extract metadata from query params with ! prefix.
 
-    e.g., ?!foo=bar&!session=abc -> {"foo": "bar", "session": "abc"}
+    e.g., ?!foo=bar&!queue=myqueue -> {"foo": "bar", "queue": "myqueue"}
     """
     metadata = {}
     for key, value in request.query_params.items():
@@ -146,9 +146,9 @@ async def speak(body: SpeakRequest, request: Request):
         if query_metadata:
             metadata.update(query_metadata)
 
-        # Handle deprecated session_id
-        if body.session_id and "session" not in metadata:
-            metadata["session"] = body.session_id
+        # Handle deprecated session_id (maps to queue)
+        if body.session_id and "queue" not in metadata:
+            metadata["queue"] = body.session_id
 
         # Apply title prefix if provided
         title = extract_title(request)
@@ -198,9 +198,9 @@ async def summarize_and_speak(body: SummarizeRequest, request: Request):
         if query_metadata:
             metadata.update(query_metadata)
 
-        # Handle deprecated session_id
-        if body.session_id and "session" not in metadata:
-            metadata["session"] = body.session_id
+        # Handle deprecated session_id (maps to queue)
+        if body.session_id and "queue" not in metadata:
+            metadata["queue"] = body.session_id
 
         # Generate summary
         summary = summarize_for_speech(text)
