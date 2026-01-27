@@ -8,11 +8,19 @@ import json
 import os
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
 SPEEKER_URL = os.environ.get("SPEEKER_URL", "http://127.0.0.1:7849")
+
+
+def get_default_queue() -> str:
+    """Get the default queue name from the current project directory."""
+    cwd = Path.cwd()
+    # Use the directory name as the queue name
+    return cwd.name or "default"
 
 mcp = FastMCP("speeker-tts")
 
@@ -59,7 +67,7 @@ def speak(
     text: str,
     engine: str | None = None,
     voice: str | None = None,
-    session: str | None = None,
+    queue: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate speech from text and queue for playback.
@@ -68,7 +76,7 @@ def speak(
         text: The text to speak
         engine: TTS engine to use: "pocket-tts" or "kokoro" (default: pocket-tts)
         voice: Voice to use (depends on engine, uses default if not specified)
-        session: Session identifier for grouping related utterances
+        queue: Queue name for grouping utterances (default: current project name)
 
     Returns:
         Dictionary with status, queue_id, and pending_count
@@ -77,15 +85,12 @@ def speak(
         return {"status": "error", "error": "Text cannot be empty"}
 
     data: dict[str, Any] = {"text": text}
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = {"session": queue or get_default_queue()}
     if engine:
         metadata["engine"] = engine
     if voice:
         metadata["voice"] = voice
-    if session:
-        metadata["session"] = session
-    if metadata:
-        data["metadata"] = metadata
+    data["metadata"] = metadata
 
     result = call_speeker("/speak", data)
 
@@ -105,7 +110,7 @@ def summarize_and_speak(
     text: str,
     engine: str | None = None,
     voice: str | None = None,
-    session: str | None = None,
+    queue: str | None = None,
 ) -> dict[str, Any]:
     """
     Summarize text to one concise sentence and queue for playback.
@@ -117,7 +122,7 @@ def summarize_and_speak(
         text: The text to summarize and speak (e.g., Claude's full response)
         engine: TTS engine to use: "pocket-tts" or "kokoro" (default: pocket-tts)
         voice: Voice to use (depends on engine, uses default if not specified)
-        session: Session identifier for grouping related utterances
+        queue: Queue name for grouping utterances (default: current project name)
 
     Returns:
         Dictionary with status, summary, queue_id, and pending_count
@@ -126,15 +131,12 @@ def summarize_and_speak(
         return {"status": "error", "error": "Text cannot be empty"}
 
     data: dict[str, Any] = {"text": text}
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = {"session": queue or get_default_queue()}
     if engine:
         metadata["engine"] = engine
     if voice:
         metadata["voice"] = voice
-    if session:
-        metadata["session"] = session
-    if metadata:
-        data["metadata"] = metadata
+    data["metadata"] = metadata
 
     result = call_speeker("/summarize", data)
 
