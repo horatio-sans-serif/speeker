@@ -1,0 +1,16 @@
+{
+    "pocket-tts": ["azelma", "alba", "cosette", "fantine", "eponine", "marius", "jean", "javert"],
+    "kokoro": [
+        "am_liam",
+        "af_bella",
+        "af_nicole",
+        "af_sarah",
+        "am_adam",
+        "am_michael",
+        "bf_emma",
+        "bf_isabella",
+        "bm_george",
+        "bm_lewis"
+    ],
+    "default_engine": "pocket-tts"
+}

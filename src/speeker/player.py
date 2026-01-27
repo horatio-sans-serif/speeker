@@ -51,6 +51,115 @@ _voice_states: dict[str, object] = {}
 # Cached sound files
 _intro_sound_path: Path | None = None
 _outro_sound_path: Path | None = None
+_tone_cache: dict[str, Path] = {}
+
+# Note frequencies (A4 = 440 Hz standard tuning)
+# Formula: freq = 440 * 2^((n-49)/12) where n is the key number (A0=1, C4=40, A4=49)
+NOTE_SEMITONES = {
+    "C": -9, "D": -7, "E": -5, "F": -4, "G": -2, "A": 0, "B": 2
+}
+
+
+def note_to_frequency(note: str) -> float | None:
+    """Convert a note like 'Eb3' to frequency in Hz.
+
+    Format: [A-G][b/#]?[0-8]
+    Examples: C4=261.63, A4=440, Eb3=155.56
+    """
+    import re
+    match = re.match(r"^([A-Ga-g])([b#])?([0-8])$", note)
+    if not match:
+        return None
+
+    note_name = match.group(1).upper()
+    accidental = match.group(2)
+    octave = int(match.group(3))
+
+    # Calculate semitones from A4
+    semitones = NOTE_SEMITONES.get(note_name)
+    if semitones is None:
+        return None
+
+    # Adjust for accidental
+    if accidental == "b":
+        semitones -= 1
+    elif accidental == "#":
+        semitones += 1
+
+    # Adjust for octave (A4 is reference)
+    semitones += (octave - 4) * 12
+
+    # Calculate frequency: A4 = 440 Hz
+    return 440.0 * (2.0 ** (semitones / 12.0))
+
+
+def generate_single_tone(frequency: float, duration: float = 0.045) -> Path:
+    """Generate a single tone at the given frequency."""
+    import math
+    import struct
+    import wave
+
+    # Cache key based on frequency and duration
+    cache_key = f"{frequency:.2f}_{duration:.2f}"
+    if cache_key in _tone_cache and _tone_cache[cache_key].exists():
+        return _tone_cache[cache_key]
+
+    base_dir = get_base_dir()
+    tone_dir = base_dir / "tones"
+    tone_dir.mkdir(parents=True, exist_ok=True)
+    tone_path = tone_dir / f"tone_{cache_key}.wav"
+
+    if tone_path.exists():
+        _tone_cache[cache_key] = tone_path
+        return tone_path
+
+    sample_rate = 44100
+    amplitude = 0.5
+    n_samples = int(sample_rate * duration)
+    fade_samples = int(sample_rate * 0.005)  # 5ms fade for punchy beeps
+
+    samples = []
+    for i in range(n_samples):
+        t = i / sample_rate
+        # Envelope for smooth attack/release
+        if i < fade_samples:
+            envelope = i / fade_samples
+        elif i > n_samples - fade_samples:
+            envelope = (n_samples - i) / fade_samples
+        else:
+            envelope = 1.0
+        value = amplitude * envelope * math.sin(2 * math.pi * frequency * t)
+        samples.append(int(value * 32767))
+
+    with wave.open(str(tone_path), "w") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(struct.pack(f"{len(samples)}h", *samples))
+
+    _tone_cache[cache_key] = tone_path
+    return tone_path
+
+
+def extract_tone_tokens(text: str) -> tuple[list[str], str]:
+    """Extract $Note tokens from text and return (tokens, clean_text).
+
+    Example: "$Eb3 $Eb3 Hello world" -> (["Eb3", "Eb3"], "Hello world")
+    """
+    import re
+    tokens = []
+    # Match $[A-G][b#]?[0-8] at start of text (with optional spaces between)
+    pattern = r"^\s*\$([A-Ga-g][b#]?[0-8])"
+    remaining = text
+
+    while True:
+        match = re.match(pattern, remaining)
+        if not match:
+            break
+        tokens.append(match.group(1))
+        remaining = remaining[match.end():]
+
+    return tokens, remaining.strip()
 
 
 def get_base_dir() -> Path:
@@ -280,6 +389,73 @@ def generate_tts(
         return None
 
 
+def generate_combined_tones(frequencies: list[float], duration: float = 0.045, gap: float = 0.08) -> Path:
+    """Generate a single WAV with multiple tones back-to-back."""
+    import math
+    import struct
+    import wave
+
+    # Cache key
+    cache_key = "_".join(f"{f:.0f}" for f in frequencies) + f"_{duration}_{gap}"
+    if cache_key in _tone_cache and _tone_cache[cache_key].exists():
+        return _tone_cache[cache_key]
+
+    base_dir = get_base_dir()
+    tone_dir = base_dir / "tones"
+    tone_dir.mkdir(parents=True, exist_ok=True)
+    tone_path = tone_dir / f"combined_{cache_key}.wav"
+
+    if tone_path.exists():
+        _tone_cache[cache_key] = tone_path
+        return tone_path
+
+    sample_rate = 44100
+    amplitude = 0.5
+    fade_samples = int(sample_rate * 0.005)
+    gap_samples = int(sample_rate * gap)
+
+    samples = []
+    for i, freq in enumerate(frequencies):
+        n_samples = int(sample_rate * duration)
+        for j in range(n_samples):
+            t = j / sample_rate
+            if j < fade_samples:
+                envelope = j / fade_samples
+            elif j > n_samples - fade_samples:
+                envelope = (n_samples - j) / fade_samples
+            else:
+                envelope = 1.0
+            value = amplitude * envelope * math.sin(2 * math.pi * freq * t)
+            samples.append(int(value * 32767))
+        # Add gap between tones (but not after the last one)
+        if i < len(frequencies) - 1:
+            samples.extend([0] * gap_samples)
+
+    with wave.open(str(tone_path), "w") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(struct.pack(f"{len(samples)}h", *samples))
+
+    _tone_cache[cache_key] = tone_path
+    return tone_path
+
+
+def play_tone_tokens(tokens: list[str], verbose: bool = False) -> None:
+    """Play a sequence of tone tokens (e.g., ["Eb3", "Eb3"]) as a single audio file."""
+    frequencies = []
+    for token in tokens:
+        freq = note_to_frequency(token)
+        if freq:
+            frequencies.append(freq)
+            if verbose:
+                print(f"[TONE] {token} = {freq:.2f} Hz", file=sys.stderr)
+
+    if frequencies:
+        tone_path = generate_combined_tones(frequencies)
+        play_audio(tone_path, verbose)
+
+
 def speak_text(
     text: str,
     voice: str | None = None,
@@ -289,9 +465,22 @@ def speak_text(
 ) -> Path | None:
     """Generate and play TTS for text.
 
+    Handles tone tokens like $Eb3 at the start of text - plays them as
+    musical tones before speaking the remaining text.
+
     Returns path to saved audio file if save_path provided, else None.
     """
-    audio_path = generate_tts(text, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
+    # Extract and play any leading tone tokens
+    tone_tokens, clean_text = extract_tone_tokens(text)
+    if tone_tokens:
+        play_tone_tokens(tone_tokens, verbose)
+        time.sleep(0.1)  # Pause between tones and speech
+
+    # If only tones, nothing to speak
+    if not clean_text:
+        return save_path
+
+    audio_path = generate_tts(clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
     if audio_path is None:
         return None
 
@@ -456,8 +645,42 @@ def process_queue(verbose: bool = False) -> int:
     return total_played
 
 
+def acquire_lock() -> Path | None:
+    """Try to acquire a lock file. Returns lock path if acquired, None if already running."""
+    lock_path = get_base_dir() / ".player.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if lock exists and if process is still running
+    if lock_path.exists():
+        try:
+            pid = int(lock_path.read_text().strip())
+            # Check if process is still alive
+            os.kill(pid, 0)
+            return None  # Process is still running
+        except (ValueError, OSError, ProcessLookupError):
+            # Lock file is stale, remove it
+            lock_path.unlink(missing_ok=True)
+
+    # Create lock file with our PID
+    lock_path.write_text(str(os.getpid()))
+    return lock_path
+
+
+def release_lock(lock_path: Path) -> None:
+    """Release the lock file."""
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def run_daemon(verbose: bool = False) -> None:
     """Run as a daemon - watch queue and process items immediately."""
+    lock_path = acquire_lock()
+    if lock_path is None:
+        print("[ERROR] Another speeker-player daemon is already running", file=sys.stderr)
+        sys.exit(1)
+
     if verbose:
         print("[INFO] Speeker player daemon starting...", file=sys.stderr)
 
@@ -471,22 +694,25 @@ def run_daemon(verbose: bool = False) -> None:
 
     last_activity = time.time()
 
-    while True:
-        pending = get_pending_count()
+    try:
+        while True:
+            pending = get_pending_count()
 
-        if pending > 0:
-            if verbose:
-                print(f"[INFO] Processing {pending} pending item(s)", file=sys.stderr)
-            process_queue(verbose)
-            last_activity = time.time()
-        else:
-            # Check for idle timeout
-            if time.time() - last_activity > IDLE_TIMEOUT:
+            if pending > 0:
                 if verbose:
-                    print("[INFO] Idle timeout, exiting", file=sys.stderr)
-                break
+                    print(f"[INFO] Processing {pending} pending item(s)", file=sys.stderr)
+                process_queue(verbose)
+                last_activity = time.time()
+            else:
+                # Check for idle timeout
+                if time.time() - last_activity > IDLE_TIMEOUT:
+                    if verbose:
+                        print("[INFO] Idle timeout, exiting", file=sys.stderr)
+                    break
 
-        time.sleep(POLL_INTERVAL)
+            time.sleep(POLL_INTERVAL)
+    finally:
+        release_lock(lock_path)
 
 
 def run_once(verbose: bool = False) -> None:

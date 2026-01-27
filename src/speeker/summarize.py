@@ -13,17 +13,23 @@ Configuration via environment variables:
 """
 
 import json
-import os
 import re
 import urllib.request
 import urllib.error
 from typing import Any
 
-# Configuration
-LLM_BACKEND = os.environ.get("SPEEKER_LLM_BACKEND", "").lower()
-LLM_ENDPOINT = os.environ.get("SPEEKER_LLM_ENDPOINT", "")
-LLM_API_KEY = os.environ.get("SPEEKER_LLM_API_KEY", "")
-LLM_MODEL = os.environ.get("SPEEKER_LLM_MODEL", "")
+from .config import get_llm_config
+
+
+def _get_llm_settings():
+    """Get current LLM settings (re-read on each call to pick up config changes)."""
+    config = get_llm_config()
+    return (
+        config.get("backend") or "",
+        config.get("endpoint") or "",
+        config.get("api_key") or "",
+        config.get("model") or "",
+    )
 
 # Default models per backend
 DEFAULT_MODELS = {
@@ -39,22 +45,23 @@ DEFAULT_ENDPOINTS = {
     "openai": "https://api.openai.com",
 }
 
-SUMMARIZE_PROMPT = """Summarize this text for text-to-speech in 1-2 short sentences (max 30 words).
+SUMMARIZE_PROMPT = """Write ONE short sentence (max 15 words) summarizing what was accomplished.
 
 Rules:
-- No file paths, URLs, or code
-- No technical jargon - use plain language
-- Focus on WHAT was done, not HOW
-- Start with an action verb when possible
-- Must be natural to speak aloud
+- ONE sentence only, no more
+- Max 15 words
+- Start with a past-tense action verb (Fixed, Updated, Added, Completed, Resolved, etc.)
+- No file paths, URLs, code, or technical jargon
+- Describe the outcome, not the process
+- Natural spoken English
 
-Text to summarize:
+Text:
 {text}
 
-Speakable summary:"""
+One-sentence summary:"""
 
 
-def summarize_for_speech(text: str, max_words: int = 30) -> str:
+def summarize_for_speech(text: str, max_words: int = 15) -> str:
     """Summarize text for TTS using configured LLM backend.
 
     Args:
@@ -72,7 +79,8 @@ def summarize_for_speech(text: str, max_words: int = 30) -> str:
         text = text[:4000] + "..."
 
     # Try LLM summarization if configured
-    if LLM_BACKEND:
+    llm_backend, _, _, _ = _get_llm_settings()
+    if llm_backend:
         try:
             response = call_llm(SUMMARIZE_PROMPT.format(text=text))
             if response:
@@ -88,19 +96,21 @@ def summarize_for_speech(text: str, max_words: int = 30) -> str:
 
 def call_llm(prompt: str) -> str | None:
     """Call the configured LLM backend."""
-    if LLM_BACKEND == "ollama":
+    llm_backend, _, _, _ = _get_llm_settings()
+    if llm_backend == "ollama":
         return call_ollama(prompt)
-    elif LLM_BACKEND == "anthropic":
+    elif llm_backend == "anthropic":
         return call_anthropic(prompt)
-    elif LLM_BACKEND == "openai":
+    elif llm_backend == "openai":
         return call_openai(prompt)
     return None
 
 
 def call_ollama(prompt: str) -> str | None:
     """Call Ollama API."""
-    endpoint = LLM_ENDPOINT or DEFAULT_ENDPOINTS["ollama"]
-    model = LLM_MODEL or DEFAULT_MODELS["ollama"]
+    _, llm_endpoint, _, llm_model = _get_llm_settings()
+    endpoint = llm_endpoint or DEFAULT_ENDPOINTS["ollama"]
+    model = llm_model or DEFAULT_MODELS["ollama"]
 
     data = json.dumps({
         "model": model,
@@ -129,11 +139,12 @@ def call_ollama(prompt: str) -> str | None:
 
 def call_anthropic(prompt: str) -> str | None:
     """Call Anthropic API."""
-    if not LLM_API_KEY:
+    _, llm_endpoint, llm_api_key, llm_model = _get_llm_settings()
+    if not llm_api_key:
         return None
 
-    endpoint = LLM_ENDPOINT or DEFAULT_ENDPOINTS["anthropic"]
-    model = LLM_MODEL or DEFAULT_MODELS["anthropic"]
+    endpoint = llm_endpoint or DEFAULT_ENDPOINTS["anthropic"]
+    model = llm_model or DEFAULT_MODELS["anthropic"]
 
     data = json.dumps({
         "model": model,
@@ -146,7 +157,7 @@ def call_anthropic(prompt: str) -> str | None:
         data=data,
         headers={
             "Content-Type": "application/json",
-            "x-api-key": LLM_API_KEY,
+            "x-api-key": llm_api_key,
             "anthropic-version": "2023-06-01",
         },
         method="POST"
@@ -165,11 +176,12 @@ def call_anthropic(prompt: str) -> str | None:
 
 def call_openai(prompt: str) -> str | None:
     """Call OpenAI-compatible API."""
-    if not LLM_API_KEY:
+    _, llm_endpoint, llm_api_key, llm_model = _get_llm_settings()
+    if not llm_api_key:
         return None
 
-    endpoint = LLM_ENDPOINT or DEFAULT_ENDPOINTS["openai"]
-    model = LLM_MODEL or DEFAULT_MODELS["openai"]
+    endpoint = llm_endpoint or DEFAULT_ENDPOINTS["openai"]
+    model = llm_model or DEFAULT_MODELS["openai"]
 
     data = json.dumps({
         "model": model,
@@ -183,7 +195,7 @@ def call_openai(prompt: str) -> str | None:
         data=data,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {LLM_API_KEY}",
+            "Authorization": f"Bearer {llm_api_key}",
         },
         method="POST"
     )
@@ -200,7 +212,7 @@ def call_openai(prompt: str) -> str | None:
 
 
 def clean_summary(text: str, max_words: int) -> str:
-    """Clean up LLM response."""
+    """Clean up LLM response to ensure ONE concise sentence."""
     text = text.strip()
 
     # If there are multiple lines, take the last non-empty one
@@ -224,6 +236,7 @@ def clean_summary(text: str, max_words: int) -> str:
         "summary:", "here's a summary:", "speakable summary:",
         "here is a summary:", "tts summary:", "short summary:",
         "here's the summary:", "the summary is:",
+        "one-sentence summary:", "one sentence summary:",
     ]
     text_lower = text.lower()
     for prefix in prefixes:
@@ -233,6 +246,11 @@ def clean_summary(text: str, max_words: int) -> str:
 
     # Remove leading dashes or bullets
     text = re.sub(r'^[-•*]\s*', '', text)
+
+    # Keep only the FIRST sentence (truncate at first sentence boundary)
+    sentence_match = re.match(r'^[^.!?]+[.!?]', text)
+    if sentence_match:
+        text = sentence_match.group(0)
 
     # Enforce word limit
     words = text.split()
@@ -244,8 +262,8 @@ def clean_summary(text: str, max_words: int) -> str:
     return text.strip()
 
 
-def fallback_summarize(text: str, max_words: int = 30) -> str:
-    """Simple fallback summarization without LLM."""
+def fallback_summarize(text: str, max_words: int = 15) -> str:
+    """Fallback summarization without LLM - extracts key outcome sentence."""
     # Remove code blocks
     text = re.sub(r'```[\s\S]*?```', '', text)
     text = re.sub(r'`[^`]+`', '', text)
@@ -256,52 +274,100 @@ def fallback_summarize(text: str, max_words: int = 30) -> str:
     # Remove URLs
     text = re.sub(r'https?://\S+', '', text)
 
-    # Remove markdown
+    # Remove markdown formatting
     text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
     text = re.sub(r'\*([^*]+)\*', r'\1', text)
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'^\s*[-*]\s+', '', text, flags=re.MULTILINE)
     text = re.sub(r'\|[^|]*\|', ' ', text)
+    text = re.sub(r'^\d+\.\s+', '', text, flags=re.MULTILINE)
+
+    # Remove common verbose patterns that introduce summaries/lists
+    verbose_patterns = [
+        r"Here'?s a summary[:\s].*",
+        r"Summary[:\s].*",
+        r"Here'?s what (?:was|I) (?:done|did|changed|added|fixed|updated)[:\s].*",
+        r"The following (?:changes|updates|fixes) were (?:made|applied)[:\s].*",
+        r"Changes[:\s].*",
+        r"What was done[:\s].*",
+        r"Key (?:changes|findings|points)[:\s].*",
+    ]
+    for pattern in verbose_patterns:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE)
 
     # Clean whitespace
     text = re.sub(r'\s+', ' ', text).strip()
 
-    if not text or len(text) < 10:
-        return "Task completed"
+    if not text or len(text) < 5:
+        return "Task completed."
 
-    # Take first sentences up to word limit
+    # Split into sentences
     sentences = re.split(r'(?<=[.!?])\s+', text)
-    words = []
+
+    # Find the first good sentence (short, starts with action verb, no colons)
+    action_verbs = [
+        'fixed', 'added', 'updated', 'completed', 'resolved', 'created',
+        'removed', 'implemented', 'deployed', 'configured', 'enabled',
+        'disabled', 'changed', 'modified', 'refactored', 'moved', 'done',
+        'finished', 'built', 'installed', 'set', 'applied', 'merged',
+    ]
+
     for sentence in sentences:
-        sentence_words = sentence.split()
-        if len(words) + len(sentence_words) <= max_words:
-            words.extend(sentence_words)
-        else:
-            remaining = max_words - len(words)
-            if remaining > 3:
-                words.extend(sentence_words[:remaining])
-            break
+        sentence = sentence.strip()
+        if not sentence:
+            continue
 
-    summary = ' '.join(words)
-    if summary and summary[-1] not in '.!?':
-        summary = summary.rstrip(',;:') + '.'
+        # Skip sentences that are too short or introduce lists
+        if len(sentence) < 10:
+            continue
+        if sentence.endswith(':'):
+            continue
+        if re.search(r'\d+\.\s', sentence):
+            continue
 
-    return summary if summary else "Task completed"
+        words = sentence.split()
+        word_count = len(words)
+
+        # Prefer sentences that start with action verbs
+        first_word = words[0].lower().rstrip('.,!?:')
+        if first_word in action_verbs and word_count <= max_words:
+            if not sentence.endswith('.'):
+                sentence += '.'
+            return sentence
+
+        # Accept any reasonably short sentence
+        if word_count <= max_words and word_count >= 3:
+            if not sentence.endswith('.'):
+                sentence += '.'
+            return sentence
+
+    # Last resort: take first max_words from first sentence
+    if sentences:
+        first = sentences[0].strip()
+        words = first.split()[:max_words]
+        summary = ' '.join(words)
+        if summary and summary[-1] not in '.!?':
+            summary = summary.rstrip(',;:') + '.'
+        return summary
+
+    return "Task completed."
 
 
 def get_backend_info() -> dict[str, Any]:
     """Get information about the configured backend."""
-    if not LLM_BACKEND:
+    llm_backend, llm_endpoint, llm_api_key, llm_model = _get_llm_settings()
+
+    if not llm_backend:
         return {
             "configured": False,
             "backend": None,
-            "message": "No LLM backend configured. Set SPEEKER_LLM_BACKEND to enable.",
+            "message": "No LLM backend configured. Set llm.backend in ~/.config/speeker/config.json or SPEEKER_LLM_BACKEND env var.",
         }
 
     return {
         "configured": True,
-        "backend": LLM_BACKEND,
-        "endpoint": LLM_ENDPOINT or DEFAULT_ENDPOINTS.get(LLM_BACKEND, ""),
-        "model": LLM_MODEL or DEFAULT_MODELS.get(LLM_BACKEND, ""),
-        "has_api_key": bool(LLM_API_KEY),
+        "backend": llm_backend,
+        "endpoint": llm_endpoint or DEFAULT_ENDPOINTS.get(llm_backend, ""),
+        "model": llm_model or DEFAULT_MODELS.get(llm_backend, ""),
+        "has_api_key": bool(llm_api_key),
     }

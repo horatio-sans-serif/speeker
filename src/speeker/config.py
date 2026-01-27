@@ -12,6 +12,12 @@ DEFAULT_CONFIG = {
         "model": "all-MiniLM-L6-v2",
         "cache_dir": None,  # None = default (~/.cache), or set to "/tmp/speeker-models"
     },
+    "llm": {
+        "backend": None,  # "ollama", "anthropic", or "openai"
+        "endpoint": None,  # API endpoint (default per backend if None)
+        "api_key": None,  # Required for anthropic/openai
+        "model": None,  # Model name (default per backend if None)
+    },
 }
 
 
@@ -61,3 +67,24 @@ def get_embedding_cache_dir() -> str | None:
     """Get the configured cache directory for embedding models."""
     config = get_config()
     return config.get("semantic_search", {}).get("cache_dir")
+
+
+def get_llm_config() -> dict:
+    """Get LLM configuration (config file overrides env vars)."""
+    import os
+
+    config = get_config()
+    llm_config = config.get("llm", {})
+
+    # Environment variables override config file
+    backend = os.environ.get("SPEEKER_LLM_BACKEND") or llm_config.get("backend")
+    endpoint = os.environ.get("SPEEKER_LLM_ENDPOINT") or llm_config.get("endpoint")
+    api_key = os.environ.get("SPEEKER_LLM_API_KEY") or llm_config.get("api_key")
+    model = os.environ.get("SPEEKER_LLM_MODEL") or llm_config.get("model")
+
+    return {
+        "backend": backend.lower() if backend else None,
+        "endpoint": endpoint,
+        "api_key": api_key,
+        "model": model,
+    }
