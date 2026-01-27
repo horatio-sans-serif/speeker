@@ -82,6 +82,14 @@ Web UI showing queue history with search.
 
 Settings page for global or per-session configuration.
 
+### GET /api/items
+
+JSON endpoint for real-time updates (used by web UI polling).
+
+```json
+{"hash": "abc123", "items": [...]}
+```
+
 ### GET /health
 
 Health check endpoint.
@@ -90,10 +98,11 @@ Health check endpoint.
 
 Access at `http://127.0.0.1:7849/`
 
-- **Search**: Type to search (debounced, no button needed)
-- **Data column**: Click to expand metadata key-value pairs
-- **Play**: Click to play audio in browser
-- **Status**: Shows Played/Pending state
+- **Real-time updates**: Auto-refreshes every 2 seconds when items are added/played
+- **Card layout**: Full-width responsive grid of message cards
+- **Search**: Type to search (debounced, real-time updates paused during search)
+- **Play**: Click play icon; playing card shows animated border, others dim
+- **Metadata**: Displayed inline in small monospace text (scrollable)
 
 ## CLI
 
@@ -113,6 +122,8 @@ speeker-player --daemon     # Run as daemon (low latency)
 speeker-player --cleanup 7  # Delete audio older than 7 days
 ```
 
+The daemon uses a lock file (`~/.speeker/.player.lock`) to prevent multiple instances from running simultaneously.
+
 ### speeker
 
 ```bash
@@ -123,6 +134,24 @@ speeker speak -v bf_emma        # Use specific voice
 speeker voices                  # List available voices
 speeker status                  # Show queue status
 ```
+
+## Tone Tokens
+
+Prefix text with `$Note` tokens to play musical tones before speech:
+
+```bash
+# Play two Eb3 tones then speak
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "$Eb3 $Eb3 Alert: build failed"}'
+
+# Just play tones (no speech)
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "$C4 $E4 $G4"}'
+```
+
+Note format: `$[A-G][b/#]?[0-8]` (e.g., `$C4`, `$Eb3`, `$F#5`)
 
 ## Configuration
 
@@ -144,11 +173,12 @@ speeker status                  # Show queue status
 
 Settings are hierarchical: global defaults with per-session overrides.
 
-| Setting       | Default  | Description                    |
-| ------------- | -------- | ------------------------------ |
-| `intro_sound` | true     | Play tone before/after batches |
-| `speed`       | 1.0      | Playback speed (0.5 - 2.0)     |
-| `voice`       | "azelma" | TTS voice name                 |
+| Setting       | Default      | Description                    |
+| ------------- | ------------ | ------------------------------ |
+| `intro_sound` | true         | Play tone before/after batches |
+| `speed`       | 1.0          | Playback speed (0.5 - 2.0)     |
+| `engine`      | "pocket-tts" | TTS engine (pocket-tts/kokoro) |
+| `voice`       | "azelma"     | TTS voice name                 |
 
 ## Voices
 
@@ -194,10 +224,13 @@ Settings are hierarchical: global defaults with per-session overrides.
 ```
 ~/.speeker/
 ├── queue.db                    # SQLite database
-└── audio/
-    └── 2024-01-15/
-        ├── 123.wav             # Audio files by queue ID
-        └── 124.wav
+├── .player.lock                # Daemon lock file (PID)
+├── audio/
+│   └── 2024-01-15/
+│       ├── 123.wav             # Audio files by queue ID
+│       └── 124.wav
+└── tones/
+    └── tone_311.13_0.045.wav   # Cached tone files
 
 ~/.config/speeker/
 └── config.json                 # Server configuration
@@ -216,7 +249,7 @@ Settings are hierarchical: global defaults with per-session overrides.
 
 **settings** - Per-session settings
 
-- `session_id`, `intro_sound`, `speed`, `voice`
+- `session_id`, `intro_sound`, `speed`, `voice`, `engine`
 
 ## Development
 

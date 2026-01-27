@@ -41,9 +41,9 @@ def extract_title(request: Request) -> str | None:
 
 
 def format_with_title(text: str, title: str | None) -> str:
-    """Format text with optional title prefix and attention tones."""
+    """Format text with optional title prefix and attention tone."""
     if title:
-        return f"$Eb3 $Eb3 {title}. {text}"
+        return f"$Eb4 {title}. {text}"
     return text
 
 
