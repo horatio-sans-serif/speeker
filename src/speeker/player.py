@@ -53,8 +53,36 @@ _intro_sound_path: Path | None = None
 _outro_sound_path: Path | None = None
 _tone_cache: dict[str, Path] = {}
 
-# Import tone synthesis from pytone
-from pytone import note_to_frequency, extract_tone_tokens, generate_tones, samples_to_wav
+# Musical note parsing for tone tokens
+import re
+
+NOTE_PATTERN = re.compile(r"^\s*\$([A-Ga-g])([b#]?)([0-8])")
+
+def parse_note_token(token: str) -> tuple[str, int] | None:
+    """Parse a note token like 'Eb4' into (note_name, octave)."""
+    match = re.match(r"([A-Ga-g])([b#]?)([0-8])", token)
+    if not match:
+        return None
+    note = match.group(1).lower()
+    accidental = match.group(2)
+    octave = int(match.group(3))
+    # tones uses '#' for sharp, 'b' for flat in note name
+    if accidental:
+        note = note + accidental
+    return note, octave
+
+def extract_tone_tokens(text: str) -> tuple[list[str], str]:
+    """Extract $Note tokens from text and return (tokens, clean_text)."""
+    tokens = []
+    remaining = text
+    while True:
+        match = NOTE_PATTERN.match(remaining)
+        if not match:
+            break
+        full_note = match.group(1) + match.group(2) + match.group(3)
+        tokens.append(full_note)
+        remaining = remaining[match.end():]
+    return tokens, remaining.strip()
 
 
 def get_base_dir() -> Path:
@@ -284,10 +312,13 @@ def generate_tts(
         return None
 
 
-def generate_combined_tones(frequencies: list[float], duration: float = 0.8, gap: float = 0.06) -> Path:
-    """Generate a single WAV with multiple tones back-to-back using pytone."""
+def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8) -> Path:
+    """Generate a single WAV with tones using the tones library."""
+    from tones import SINE_WAVE
+    from tones.mixer import Mixer
+
     # Cache key
-    cache_key = "_".join(f"{f:.0f}" for f in frequencies) + f"_{duration}_{gap}_v5"
+    cache_key = "_".join(tokens) + f"_{duration}_v6"
     if cache_key in _tone_cache and _tone_cache[cache_key].exists():
         return _tone_cache[cache_key]
 
@@ -300,27 +331,31 @@ def generate_combined_tones(frequencies: list[float], duration: float = 0.8, gap
         _tone_cache[cache_key] = tone_path
         return tone_path
 
-    # Use pytone for synthesis
-    samples = generate_tones(frequencies, duration=duration, gap=gap, style="vibraphone", reverb=True)
-    samples_to_wav(samples, tone_path)
+    # Use tones library for synthesis
+    mixer = Mixer(44100, 0.5)
+    mixer.create_track(0, SINE_WAVE, vibrato_frequency=5.5, vibrato_variance=0.02, attack=0.01, decay=0.3)
 
+    for token in tokens:
+        parsed = parse_note_token(token)
+        if parsed:
+            note, octave = parsed
+            mixer.add_note(0, note=note, octave=octave, duration=duration)
+
+    mixer.write_wav(str(tone_path))
     _tone_cache[cache_key] = tone_path
     return tone_path
 
 
 def play_tone_tokens(tokens: list[str], verbose: bool = False) -> None:
-    """Play a sequence of tone tokens (e.g., ["Eb3", "Eb3"]) as a single audio file."""
-    frequencies = []
-    for token in tokens:
-        freq = note_to_frequency(token)
-        if freq:
-            frequencies.append(freq)
-            if verbose:
-                print(f"[TONE] {token} = {freq:.2f} Hz", file=sys.stderr)
+    """Play a sequence of tone tokens (e.g., ["Eb4"]) as a single audio file."""
+    if not tokens:
+        return
 
-    if frequencies:
-        tone_path = generate_combined_tones(frequencies)
-        play_audio(tone_path, verbose)
+    if verbose:
+        print(f"[TONE] Playing tokens: {tokens}", file=sys.stderr)
+
+    tone_path = generate_combined_tones_from_tokens(tokens)
+    play_audio(tone_path, verbose)
 
 
 def speak_text(

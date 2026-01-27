@@ -11,6 +11,7 @@ dependencies = [
     "torch>=2.5",
     "fastapi",
     "uvicorn",
+    "tones>=1.2.0",
 ]
 
 [project.optional-dependencies]
@@ -31,7 +32,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/speeker", "src/pytone"]
+packages = ["src/speeker"]
 
 [tool.ruff]
 line-length = 100
