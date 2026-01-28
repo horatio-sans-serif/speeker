@@ -304,13 +304,13 @@ def relative_time(dt_str: str) -> str | None:
         return f"about {days} days ago"
 
 
-def get_session_label(session_id: str) -> str:
-    """Get a human-friendly label for a session ID."""
-    if not session_id or session_id == "default":
-        return "the default session"
-    # Use first 8 chars of session ID
-    short_id = session_id[:8] if len(session_id) > 8 else session_id
-    return f"session {short_id}"
+def get_queue_label(queue_id: str | None) -> str:
+    """Get a human-friendly label for a queue ID."""
+    if not queue_id or queue_id == "default":
+        return "the default queue"
+    # Use first 8 chars of queue ID
+    short_id = queue_id[:8] if len(queue_id) > 8 else queue_id
+    return f"queue {short_id}"
 
 
 # --- Settings ---

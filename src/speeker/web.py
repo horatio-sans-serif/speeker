@@ -247,14 +247,12 @@ HTML_TEMPLATE = """
             notifyBtn.style.background = '#666';
         }
 
-        function showNotification(text) {
+        function showNotification(text, queue) {
             if ('Notification' in window && Notification.permission === 'granted') {
                 // Truncate long text for notification
                 const truncated = text.length > 200 ? text.substring(0, 197) + '...' : text;
-                new Notification('Speeker', {
-                    body: truncated,
-                    icon: '/favicon.ico'
-                });
+                const title = queue && queue !== 'default' ? `Speeker [${queue}]` : 'Speeker';
+                new Notification(title, { body: truncated });
             }
         }
 
@@ -311,15 +309,20 @@ HTML_TEMPLATE = """
                 if (data.hash !== lastHash) {
                     lastHash = data.hash;
                     // Check for new pending items and notify immediately
+                    const currentIds = new Set(data.items.map(i => String(i.id)));
                     for (const item of data.items) {
                         const id = String(item.id);
                         if (!item.played && !notifiedItems.has(id)) {
                             // New pending item - notify so user can read along
                             const temp = document.createElement('div');
                             temp.innerHTML = item.text;
-                            showNotification(temp.textContent);
+                            showNotification(temp.textContent, item.queue);
                             notifiedItems.add(id);
                         }
+                    }
+                    // Prune old IDs no longer in the list to prevent memory growth
+                    for (const id of notifiedItems) {
+                        if (!currentIds.has(id)) notifiedItems.delete(id);
                     }
                     updateCards(data.items);
                 }
@@ -499,6 +502,7 @@ async def api_items():
     result = []
     for item in items:
         has_audio = bool(item["audio_path"]) and Path(item["audio_path"]).exists() if item["audio_path"] else False
+        queue = item.get("session_id") or "default"
         result.append({
             "id": item["id"],
             "text": escape_html(item["text"]),
@@ -506,6 +510,7 @@ async def api_items():
             "played": bool(item["played_at"]),
             "has_audio": has_audio,
             "metadata": render_metadata(item.get("metadata")),
+            "queue": queue,
         })
 
     return JSONResponse({"hash": items_hash, "items": result})
