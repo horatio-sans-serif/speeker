@@ -27,7 +27,7 @@ from .queue_db import (
     get_settings,
     mark_played,
     relative_time,
-    get_session_label,
+    get_queue_label,
     set_last_utterance_time,
     cleanup_old_entries,
 )
@@ -411,14 +411,14 @@ def build_session_script(session_id: str, items: list[dict], is_only_session: bo
     """Build the speech script for a session's messages."""
     lines = []
     count = len(items)
-    session_label = get_session_label(session_id)
+    queue_label = get_queue_label(session_id)
 
-    # Session header (skip if single message in single session)
+    # Queue header (skip if single message in single queue)
     if not (count == 1 and is_only_session):
         if count == 1:
-            lines.append(f"For {session_label}, there is 1 message.")
+            lines.append(f"For {queue_label}, there is 1 message.")
         else:
-            lines.append(f"For {session_label}, there are {count} messages.")
+            lines.append(f"For {queue_label}, there are {count} messages.")
 
     # Each message
     for i, item in enumerate(items):

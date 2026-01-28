@@ -70,7 +70,7 @@ def get_words(text: str) -> set[str]:
     return set(normalize_text(text).split())
 
 
-def test_case(
+def run_test_case(
     model: WhisperModel,
     input_text: str,
     required_words: list[str],
@@ -145,7 +145,7 @@ def main():
 
     results = []
     for input_text, required, forbidden in TEST_CASES:
-        result = test_case(model, input_text, required, forbidden)
+        result = run_test_case(model, input_text, required, forbidden)
         results.append(result)
 
     # Summary
