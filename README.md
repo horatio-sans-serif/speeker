@@ -1,5 +1,10 @@
 # Speeker
 
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://github.com/horatio-sans-serif/speeker/actions/workflows/test.yml/badge.svg)](https://github.com/horatio-sans-serif/speeker/actions/workflows/test.yml)
+[![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://github.com/horatio-sans-serif/speeker)
+
 A text-to-speech system with HTTP API, web UI, and CLI. Queue text for playback with metadata, search history, and configurable voices.
 
 ## Features
@@ -261,6 +266,12 @@ uv sync
 
 # Run from source
 uv run speeker-server
+
+# Run tests
+uv run pytest
+
+# Run tests with coverage
+uv run pytest --cov=speeker --cov-report=term-missing
 
 # Format
 uv run ruff format src/
