@@ -201,6 +201,7 @@ HTML_TEMPLATE = """
             <span class="subtitle">TTS Queue History</span>
         </div>
         <div class="search-box">
+            <button id="notify-btn" style="margin-right:10px; background:#00d9ff; color:#000; border:none; padding:6px 12px; border-radius:4px; cursor:pointer; font-size:13px;">Enable Notifications</button>
             <input type="text" id="search" placeholder="Search..." value="{query}">
         </div>
     </div>
@@ -215,6 +216,47 @@ HTML_TEMPLATE = """
         const player = document.getElementById('player');
         const grid = document.getElementById('cards-grid');
         let currentCard = null;
+
+        // Track items we've already notified about
+        let notifiedItems = new Set();
+
+        // Notification permission - show button if not yet granted (Safari needs user gesture)
+        const notifyBtn = document.getElementById('notify-btn');
+        if ('Notification' in window) {
+            const perm = Notification.permission;
+            if (perm === 'granted') {
+                notifyBtn.style.display = 'none';
+            } else if (perm === 'denied') {
+                notifyBtn.textContent = 'Notifications Blocked';
+                notifyBtn.style.background = '#666';
+                notifyBtn.style.cursor = 'default';
+            } else {
+                notifyBtn.onclick = async () => {
+                    const result = await Notification.requestPermission();
+                    if (result === 'granted') {
+                        notifyBtn.style.display = 'none';
+                    } else if (result === 'denied') {
+                        notifyBtn.textContent = 'Notifications Blocked';
+                        notifyBtn.style.background = '#666';
+                        notifyBtn.style.cursor = 'default';
+                    }
+                };
+            }
+        } else {
+            notifyBtn.textContent = 'No Notification Support';
+            notifyBtn.style.background = '#666';
+        }
+
+        function showNotification(text) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+                // Truncate long text for notification
+                const truncated = text.length > 200 ? text.substring(0, 197) + '...' : text;
+                new Notification('Speeker', {
+                    body: truncated,
+                    icon: '/favicon.ico'
+                });
+            }
+        }
 
         function playAudio(id, btn) {
             const card = btn.closest('.card');
@@ -250,6 +292,15 @@ HTML_TEMPLATE = """
             }, 300);
         });
 
+        // Initialize notified items from initial page load (don't notify for existing items)
+        function initNotifiedItems() {
+            const cards = grid.querySelectorAll('.card');
+            cards.forEach(card => {
+                notifiedItems.add(card.dataset.id);
+            });
+        }
+        initNotifiedItems();
+
         // Real-time updates
         let lastHash = '{items_hash}';
         async function checkUpdates() {
@@ -259,6 +310,17 @@ HTML_TEMPLATE = """
                 const data = await resp.json();
                 if (data.hash !== lastHash) {
                     lastHash = data.hash;
+                    // Check for new pending items and notify immediately
+                    for (const item of data.items) {
+                        const id = String(item.id);
+                        if (!item.played && !notifiedItems.has(id)) {
+                            // New pending item - notify so user can read along
+                            const temp = document.createElement('div');
+                            temp.innerHTML = item.text;
+                            showNotification(temp.textContent);
+                            notifiedItems.add(id);
+                        }
+                    }
                     updateCards(data.items);
                 }
             } catch (e) {}
