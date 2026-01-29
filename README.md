@@ -1,7 +1,7 @@
 # Speeker
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20NC-blue.svg)](LICENSE)
 [![Tests](https://github.com/horatio-sans-serif/speeker/actions/workflows/test.yml/badge.svg)](https://github.com/horatio-sans-serif/speeker/actions/workflows/test.yml)
 [![Coverage](https://img.shields.io/badge/coverage-89%25-brightgreen.svg)](https://github.com/horatio-sans-serif/speeker)
 
@@ -279,4 +279,4 @@ uv run ruff format src/
 
 ## License
 
-MIT
+[PolyForm Noncommercial 1.0.0](LICENSE) - Free to use and modify for non-commercial purposes.
