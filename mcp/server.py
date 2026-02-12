@@ -80,7 +80,8 @@ def speak(
     Args:
         text: The text to speak
         engine: TTS engine to use: "pocket-tts" or "kokoro" (default: pocket-tts)
-        voice: Voice to use (depends on engine, uses default if not specified)
+        voice: Voice to use. Built-in voices depend on engine. Custom cloned voices
+               (created with `speeker voice-clone`) can also be used by name.
         queue: Queue name for grouping utterances (default: current project name)
 
     Returns:
@@ -162,10 +163,10 @@ def summarize_and_speak(
 @mcp.tool()
 def list_voices(engine: str | None = None) -> dict[str, Any]:
     """
-    List available TTS voices.
+    List available TTS voices, including custom cloned voices.
 
     Args:
-        engine: Filter by engine ("pocket-tts" or "kokoro"), or None for all
+        engine: Filter by engine ("pocket-tts", "kokoro", or "custom"), or None for all
 
     Returns:
         Dictionary with available voices grouped by engine

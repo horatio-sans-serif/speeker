@@ -9,7 +9,6 @@ import pytest
 from speeker.player import (
     parse_note_token,
     extract_tone_tokens,
-    get_base_dir,
     get_audio_player,
     get_intro_sound,
     get_outro_sound,
@@ -17,7 +16,6 @@ from speeker.player import (
     should_announce_intro,
     build_session_script,
     NOTE_PATTERN,
-    DEFAULT_BASE_DIR,
     POLL_INTERVAL,
     IDLE_TIMEOUT,
     PAUSE_BETWEEN_MESSAGES,
@@ -138,23 +136,6 @@ class TestExtractToneTokens:
         """Test whitespace is stripped from remaining text."""
         tokens, text = extract_tone_tokens("$E4    Hello  ")
         assert text == "Hello"
-
-
-class TestGetBaseDir:
-    """Tests for get_base_dir function in player."""
-
-    def test_get_base_dir_default(self):
-        """Test returns default directory when env not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("SPEEKER_DIR", None)
-            result = get_base_dir()
-            assert result == DEFAULT_BASE_DIR
-
-    def test_get_base_dir_from_env(self):
-        """Test returns directory from environment variable."""
-        with patch.dict(os.environ, {"SPEEKER_DIR": "/custom/path"}):
-            result = get_base_dir()
-            assert result == Path("/custom/path")
 
 
 class TestGetAudioPlayer:
@@ -284,12 +265,10 @@ class TestParseNoteTokenEdgeCases:
     def test_parse_note_token_double_sharp(self):
         """Test double sharp is not valid."""
         result = parse_note_token("A##4")
-        # Pattern doesn't match double accidentals
         assert result is None
 
     def test_parse_note_token_with_trailing_text(self):
         """Test note with trailing text."""
-        # parse_note_token doesn't care about trailing text
         result = parse_note_token("C4hello")
         assert result == ("c", 4)
 
@@ -305,9 +284,7 @@ class TestExtractToneTokensEdgeCases:
 
     def test_extract_consecutive_tokens(self):
         """Test consecutive tokens without spaces."""
-        # The pattern requires whitespace handling, let's test
         tokens, text = extract_tone_tokens("$C4$E4 Hello")
-        # First token parsed, then continues
         assert "C4" in tokens
 
 
@@ -319,7 +296,6 @@ class TestGetIntroSound:
         import speeker.player as player
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            # Reset cached path
             original = player._intro_sound_path
             player._intro_sound_path = None
             try:
@@ -474,9 +450,7 @@ class TestBuildSessionScript:
 
         script = build_session_script("session1", items, is_only_session=True)
 
-        # Single message in only session - just says the text
         assert any("Hello world" in line for line in script)
-        # No header for single message in single session
         assert not any("there is 1 message" in line.lower() for line in script)
 
     @patch("speeker.player.get_queue_label")
@@ -490,9 +464,7 @@ class TestBuildSessionScript:
 
         script = build_session_script("session1", items, is_only_session=True)
 
-        # Should have header
         assert any("2 messages" in line for line in script)
-        # Should have first/last markers
         assert any("First" in line for line in script)
         assert any("Last" in line for line in script)
 
@@ -504,7 +476,6 @@ class TestBuildSessionScript:
 
         script = build_session_script("session1", items, is_only_session=False)
 
-        # Should have header even for single message when not only session
         assert any("1 message" in line for line in script)
 
 
@@ -531,8 +502,8 @@ class TestAcquireLock:
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             # Create a stale lock with invalid PID
-            lock_file = tmp_path / ".player.lock"
-            lock_file.write_text("999999999")  # Invalid PID
+            lock_file = tmp_path / "player.lock"
+            lock_file.write_text("999999999")
 
             lock_path = acquire_lock()
 
@@ -550,7 +521,7 @@ class TestReleaseLock:
         """Test release_lock removes lock file."""
         from speeker.player import release_lock
 
-        lock_file = tmp_path / ".player.lock"
+        lock_file = tmp_path / "player.lock"
         lock_file.write_text("12345")
 
         release_lock(lock_file)
@@ -561,8 +532,7 @@ class TestReleaseLock:
         """Test release_lock handles missing file."""
         from speeker.player import release_lock
 
-        lock_file = tmp_path / ".player.lock"
-        # File doesn't exist - should not raise
+        lock_file = tmp_path / "player.lock"
         release_lock(lock_file)
 
 
@@ -673,30 +643,27 @@ class TestMainFunction:
     """Tests for main entry point."""
 
     @patch("speeker.player.run_once")
-    @patch("speeker.player.get_base_dir")
     @patch("speeker.player.sys.argv", ["speeker-player"])
-    def test_main_runs_once(self, mock_base, mock_run, tmp_path):
+    def test_main_runs_once(self, mock_run, tmp_path):
         """Test main runs in one-shot mode by default."""
         from speeker.player import main
 
-        mock_base.return_value = tmp_path
-
-        result = main()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = main()
 
         assert result == 0
         mock_run.assert_called_once()
 
     @patch("speeker.player.cleanup_old_files")
-    @patch("speeker.player.get_base_dir")
     @patch("speeker.player.sys.argv", ["speeker-player", "--cleanup", "7"])
-    def test_main_cleanup_mode(self, mock_base, mock_cleanup, tmp_path, capsys):
+    def test_main_cleanup_mode(self, mock_cleanup, tmp_path, capsys):
         """Test main runs cleanup mode."""
         from speeker.player import main
 
-        mock_base.return_value = tmp_path
         mock_cleanup.return_value = 10
 
-        result = main()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = main()
 
         assert result == 0
         mock_cleanup.assert_called_once_with(7, False)
@@ -704,15 +671,13 @@ class TestMainFunction:
         assert "Removed 10" in captured.err
 
     @patch("speeker.player.run_daemon")
-    @patch("speeker.player.get_base_dir")
     @patch("speeker.player.sys.argv", ["speeker-player", "--daemon"])
-    def test_main_daemon_mode(self, mock_base, mock_daemon, tmp_path):
+    def test_main_daemon_mode(self, mock_daemon, tmp_path):
         """Test main runs daemon mode."""
         from speeker.player import main
 
-        mock_base.return_value = tmp_path
-
-        result = main()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = main()
 
         assert result == 0
         mock_daemon.assert_called_once()
@@ -740,7 +705,6 @@ class TestGenerateTTS:
 
         assert path is not None
         assert path.exists()
-        # Clean up
         path.unlink()
 
     @patch("speeker.player.get_voice_state")
@@ -881,16 +845,14 @@ class TestRunDaemon:
         """Test run_daemon starts and warms up model."""
         from speeker.player import run_daemon
 
-        lock_path = tmp_path / ".player.lock"
+        lock_path = tmp_path / "player.lock"
         mock_acquire.return_value = lock_path
         mock_pending.return_value = 0
 
-        # Make sleep raise to exit the loop after first iteration
         call_count = [0]
         def sleep_side_effect(duration):
             call_count[0] += 1
             if call_count[0] >= 2:
-                # Simulate idle timeout by raising
                 raise KeyboardInterrupt()
 
         mock_sleep.side_effect = sleep_side_effect
@@ -911,7 +873,7 @@ class TestRunDaemon:
         """Test run_daemon exits if already running."""
         from speeker.player import run_daemon
 
-        mock_acquire.return_value = None  # Lock failed
+        mock_acquire.return_value = None
 
         with pytest.raises(SystemExit) as exc_info:
             run_daemon(verbose=False)
@@ -929,8 +891,7 @@ class TestAcquireLockRunning:
         from speeker.player import acquire_lock
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            # Create a lock file with current PID (definitely running)
-            lock_file = tmp_path / ".player.lock"
+            lock_file = tmp_path / "player.lock"
             lock_file.write_text(str(os.getpid()))
 
             result = acquire_lock()
@@ -963,7 +924,6 @@ class TestBuildSessionScriptEdgeCases:
 
         script = build_session_script("session1", items, is_only_session=False)
 
-        # Should have "It" prefix when single item in multi-session context
         assert any("1 message" in line for line in script)
 
 
@@ -999,7 +959,6 @@ class TestProcessQueueAdvanced:
 
                 result = process_queue(verbose=False)
 
-        # Should have played intro
         assert mock_play_audio.called or result >= 0
 
     @patch("speeker.player.get_sessions_with_pending")
@@ -1010,7 +969,7 @@ class TestProcessQueueAdvanced:
         mock_sessions.return_value = ["session1", "session2"]
 
         with patch("speeker.player.get_pending_for_session") as mock_pending:
-            mock_pending.return_value = []  # Empty for both sessions
+            mock_pending.return_value = []
 
             result = process_queue(verbose=False)
 

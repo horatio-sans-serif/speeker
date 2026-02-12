@@ -3,6 +3,7 @@
 
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 from speeker.config import (
@@ -18,35 +19,36 @@ from speeker.config import (
 class TestGetConfig:
     """Tests for get_config function."""
 
-    def test_get_config_returns_dict(self):
+    def test_get_config_returns_dict(self, tmp_path):
         """Test that get_config returns a dictionary."""
-        config = get_config()
-        assert isinstance(config, dict)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = get_config()
+            assert isinstance(config, dict)
 
-    def test_get_config_has_semantic_search_key(self):
+    def test_get_config_has_semantic_search_key(self, tmp_path):
         """Test config has semantic_search section."""
-        config = get_config()
-        assert "semantic_search" in config
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = get_config()
+            assert "semantic_search" in config
 
-    def test_get_config_has_llm_key(self):
+    def test_get_config_has_llm_key(self, tmp_path):
         """Test config has llm section."""
-        config = get_config()
-        assert "llm" in config
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = get_config()
+            assert "llm" in config
 
-    @patch("speeker.config.CONFIG_FILE")
-    def test_get_config_missing_file_returns_defaults(self, mock_config_file):
+    def test_get_config_missing_file_returns_defaults(self, tmp_path):
         """Test missing config file returns defaults."""
-        mock_config_file.exists.return_value = False
-        # This is tricky to test without side effects, just verify structure
-        config = get_config()
-        assert "semantic_search" in config
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = get_config()
+            assert "semantic_search" in config
 
-    def test_get_config_merges_with_defaults(self):
+    def test_get_config_merges_with_defaults(self, tmp_path):
         """Test that loaded config is merged with defaults."""
-        config = get_config()
-        # Should have all default keys even if config file is partial
-        assert "enabled" in config.get("semantic_search", {})
-        assert "model" in config.get("semantic_search", {})
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = get_config()
+            assert "enabled" in config.get("semantic_search", {})
+            assert "model" in config.get("semantic_search", {})
 
 
 class TestSaveConfig:
@@ -56,26 +58,25 @@ class TestSaveConfig:
         """Test that save_config creates valid JSON."""
         test_config = {"test": "value"}
 
-        with patch("speeker.config.CONFIG_DIR", tmp_path):
-            with patch("speeker.config.CONFIG_FILE", tmp_path / "config.json"):
-                save_config(test_config)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config(test_config)
 
-                # Verify file was created and contains valid JSON
-                config_file = tmp_path / "config.json"
-                assert config_file.exists()
+            config_file = tmp_path / "config" / "config.json"
+            assert config_file.exists()
 
-                with open(config_file) as f:
-                    loaded = json.load(f)
-                assert loaded == test_config
+            with open(config_file) as f:
+                loaded = json.load(f)
+            assert loaded == test_config
 
 
 class TestIsSemanticSearchEnabled:
     """Tests for is_semantic_search_enabled function."""
 
-    def test_is_semantic_search_enabled_returns_bool(self):
+    def test_is_semantic_search_enabled_returns_bool(self, tmp_path):
         """Test returns boolean."""
-        result = is_semantic_search_enabled()
-        assert isinstance(result, bool)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = is_semantic_search_enabled()
+            assert isinstance(result, bool)
 
     @patch("speeker.config.get_config")
     def test_is_semantic_search_enabled_true(self, mock_get_config):
@@ -99,10 +100,11 @@ class TestIsSemanticSearchEnabled:
 class TestGetEmbeddingModel:
     """Tests for get_embedding_model function."""
 
-    def test_get_embedding_model_returns_string(self):
+    def test_get_embedding_model_returns_string(self, tmp_path):
         """Test returns string."""
-        result = get_embedding_model()
-        assert isinstance(result, str)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = get_embedding_model()
+            assert isinstance(result, str)
 
     @patch("speeker.config.get_config")
     def test_get_embedding_model_returns_configured_value(self, mock_get_config):
@@ -136,18 +138,20 @@ class TestGetEmbeddingCacheDir:
 class TestGetLlmConfig:
     """Tests for get_llm_config function."""
 
-    def test_get_llm_config_returns_dict(self):
+    def test_get_llm_config_returns_dict(self, tmp_path):
         """Test returns dictionary."""
-        result = get_llm_config()
-        assert isinstance(result, dict)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = get_llm_config()
+            assert isinstance(result, dict)
 
-    def test_get_llm_config_has_required_keys(self):
+    def test_get_llm_config_has_required_keys(self, tmp_path):
         """Test result has all required keys."""
-        result = get_llm_config()
-        assert "backend" in result
-        assert "endpoint" in result
-        assert "api_key" in result
-        assert "model" in result
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = get_llm_config()
+            assert "backend" in result
+            assert "endpoint" in result
+            assert "api_key" in result
+            assert "model" in result
 
     @patch("speeker.config.get_config")
     def test_get_llm_config_from_config_file(self, mock_get_config):

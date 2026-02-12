@@ -127,7 +127,7 @@ speeker-player --daemon     # Run as daemon (low latency)
 speeker-player --cleanup 7  # Delete audio older than 7 days
 ```
 
-The daemon uses a lock file (`~/.speeker/.player.lock`) to prevent multiple instances from running simultaneously.
+The daemon uses a lock file to prevent multiple instances from running simultaneously.
 
 ### speeker
 
@@ -162,15 +162,15 @@ Note format: `$[A-G][b/#]?[0-8]` (e.g., `$C4`, `$Eb3`, `$F#5`)
 
 ### Server Config
 
-`~/.config/speeker/config.json`:
+Config file location (macOS: `~/Library/Application Support/speeker/config.json`):
 
 ```json
 {
-    "semantic_search": {
-        "enabled": false,
-        "model": "all-MiniLM-L6-v2",
-        "cache_dir": null
-    }
+  "semantic_search": {
+    "enabled": false,
+    "model": "all-MiniLM-L6-v2",
+    "cache_dir": null
+  }
 }
 ```
 
@@ -226,20 +226,38 @@ Settings are hierarchical: global defaults with per-session overrides.
 
 ### Storage
 
+Speeker uses OS-appropriate directories via [platformdirs](https://github.com/platformdirs/platformdirs). On macOS:
+
 ```
-~/.speeker/
-├── queue.db                    # SQLite database
-├── .player.lock                # Daemon lock file (PID)
+~/Library/Application Support/speeker/   (config + data)
+├── config.json                          # Server configuration
+├── voice-prefs.json                     # Voice preference rankings
+├── queue.db                             # SQLite database
 ├── audio/
 │   └── 2024-01-15/
-│       ├── 123.wav             # Audio files by queue ID
+│       ├── 123.wav                      # Audio files by queue ID
 │       └── 124.wav
-└── tones/
-    └── tone_311.13_0.045.wav   # Cached tone files
+└── voices/                              # Cloned voice references
+    └── manifest.json
 
-~/.config/speeker/
-└── config.json                 # Server configuration
+~/Library/Caches/speeker/                (cache)
+├── tones/
+│   └── tone_311.13_0.045.wav            # Cached tone files
+├── voice-samples/                       # Voice preview audio
+├── tone_intro.wav
+└── tone_outro.wav
+
+/var/folders/.../T/speeker/              (runtime)
+└── player.lock                          # Daemon lock file (PID)
 ```
+
+Set `SPEEKER_DIR` to override all paths (all subdirectories under it):
+
+```bash
+SPEEKER_DIR=/tmp/speeker-test speeker status
+```
+
+Auto-migration from the legacy `~/.speeker/` and `~/.config/speeker/` layout runs once on first launch.
 
 ### Database Schema
 

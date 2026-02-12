@@ -256,6 +256,8 @@ async def queue_status():
 @app.get("/voices")
 async def get_voices(engine: str | None = None):
     """Get available TTS voices."""
+    from .voice_clone import get_custom_voices
+
     def format_voices(voice_dict: dict[str, str], default_voice: str) -> dict:
         return {
             "default": default_voice,
@@ -271,7 +273,23 @@ async def get_voices(engine: str | None = None):
     if engine is None or engine == "kokoro":
         engines["kokoro"] = format_voices(KOKORO_VOICES, DEFAULT_KOKORO_VOICE)
 
-    if engine and engine not in ("pocket-tts", "kokoro"):
+    # Include custom cloned voices
+    if engine is None or engine == "custom":
+        custom = get_custom_voices()
+        if custom:
+            engines["custom"] = {
+                "default": None,
+                "voices": {
+                    name: {
+                        "description": entry.get("description", "Custom cloned voice"),
+                        "is_default": False,
+                    }
+                    for name, entry in custom.items()
+                },
+            }
+
+    known_engines = {"pocket-tts", "kokoro", "custom"}
+    if engine and engine not in known_engines:
         return {"status": "error", "error": f"Unknown engine: {engine}"}
 
     return {
@@ -283,6 +301,9 @@ async def get_voices(engine: str | None = None):
 
 def main():
     """Run the server."""
+    from .migrate import migrate
+    migrate()
+
     parser = argparse.ArgumentParser(
         prog="speeker-server",
         description="Speeker TTS HTTP server - queues text for playback",

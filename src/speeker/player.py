@@ -18,6 +18,15 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from pocket_tts import TTSModel
 
+from .paths import (
+    audio_dir as _audio_dir,
+    cache_dir as _cache_dir,
+    ensure_dir,
+    player_lock_path,
+    tone_intro_path as _tone_intro_path,
+    tone_outro_path as _tone_outro_path,
+    tones_dir as _tones_dir,
+)
 from .queue_db import (
     get_connection,
     get_last_utterance_time,
@@ -31,9 +40,6 @@ from .queue_db import (
     set_last_utterance_time,
     cleanup_old_entries,
 )
-
-# Default base directory
-DEFAULT_BASE_DIR = Path.home() / ".speeker"
 
 # Timing
 PAUSE_BETWEEN_MESSAGES = 0.3
@@ -83,11 +89,6 @@ def extract_tone_tokens(text: str) -> tuple[list[str], str]:
         tokens.append(full_note)
         remaining = remaining[match.end():]
     return tokens, remaining.strip()
-
-
-def get_base_dir() -> Path:
-    """Get the base directory for speeker output."""
-    return Path(os.environ.get("SPEEKER_DIR", DEFAULT_BASE_DIR))
 
 
 def get_audio_player() -> list[str] | None:
@@ -148,9 +149,7 @@ def generate_tone(frequencies: list[int], rising: bool = True) -> Path:
     import struct
     import wave
 
-    base_dir = get_base_dir()
-    suffix = "intro" if rising else "outro"
-    tone_path = base_dir / f".tone_{suffix}.wav"
+    tone_path = _tone_intro_path() if rising else _tone_outro_path()
 
     if tone_path.exists():
         return tone_path
@@ -183,7 +182,7 @@ def generate_tone(frequencies: list[int], rising: bool = True) -> Path:
             gap_samples = int(sample_rate * gap_duration)
             samples.extend([0] * gap_samples)
 
-    base_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(tone_path.parent)
     with wave.open(str(tone_path), "w") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
@@ -322,9 +321,7 @@ def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8
     if cache_key in _tone_cache and _tone_cache[cache_key].exists():
         return _tone_cache[cache_key]
 
-    base_dir = get_base_dir()
-    tone_dir = base_dir / "tones"
-    tone_dir.mkdir(parents=True, exist_ok=True)
+    tone_dir = ensure_dir(_tones_dir())
     tone_path = tone_dir / f"combined_{cache_key}.wav"
 
     if tone_path.exists():
@@ -463,11 +460,9 @@ def update_audio_path(item_id: int, audio_path: Path) -> None:
 def get_audio_save_path(item_id: int) -> Path:
     """Get the path where audio for this item should be saved."""
     from datetime import datetime
-    base_dir = get_base_dir()
     today = datetime.now().strftime("%Y-%m-%d")
-    audio_dir = base_dir / "audio" / today
-    audio_dir.mkdir(parents=True, exist_ok=True)
-    return audio_dir / f"{item_id}.wav"
+    day_dir = ensure_dir(_audio_dir() / today)
+    return day_dir / f"{item_id}.wav"
 
 
 def process_queue(verbose: bool = False) -> int:
@@ -549,8 +544,9 @@ def process_queue(verbose: bool = False) -> int:
 
 def acquire_lock() -> Path | None:
     """Try to acquire a lock file. Returns lock path if acquired, None if already running."""
-    lock_path = get_base_dir() / ".player.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = player_lock_path()
+    ensure_dir(lock.parent)
+    lock_path = lock
 
     # Check if lock exists and if process is still running
     if lock_path.exists():
@@ -639,6 +635,8 @@ def cleanup_old_files(days: int, verbose: bool = False) -> int:
 def main() -> int:
     """Main entry point."""
     import argparse
+    from .migrate import migrate
+    migrate()
 
     parser = argparse.ArgumentParser(
         prog="speeker-player",
@@ -651,7 +649,6 @@ def main() -> int:
                         help="Remove entries older than DAYS days and exit")
 
     args = parser.parse_args()
-    get_base_dir().mkdir(parents=True, exist_ok=True)
 
     if args.cleanup is not None:
         removed = cleanup_old_files(args.cleanup, args.verbose)

@@ -1,10 +1,8 @@
 """Configuration management for Speeker."""
 
 import json
-from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "speeker"
-CONFIG_FILE = CONFIG_DIR / "config.json"
+from .paths import config_dir, config_file, ensure_dir
 
 DEFAULT_CONFIG = {
     "semantic_search": {
@@ -23,11 +21,12 @@ DEFAULT_CONFIG = {
 
 def get_config() -> dict:
     """Load configuration, creating default if needed."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_dir(config_dir())
+    cfg_file = config_file()
 
-    if CONFIG_FILE.exists():
+    if cfg_file.exists():
         try:
-            with open(CONFIG_FILE) as f:
+            with open(cfg_file) as f:
                 config = json.load(f)
             # Merge with defaults for any missing keys
             merged = DEFAULT_CONFIG.copy()
@@ -46,8 +45,8 @@ def get_config() -> dict:
 
 def save_config(config: dict) -> None:
     """Save configuration to file."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(CONFIG_FILE, "w") as f:
+    ensure_dir(config_dir())
+    with open(config_file(), "w") as f:
         json.dump(config, f, indent=2)
 
 

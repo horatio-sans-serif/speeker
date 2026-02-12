@@ -2,8 +2,9 @@
 """Unit tests for voice_prefs.py functions."""
 
 import json
+import os
 from pathlib import Path
-from unittest.mock import patch, mock_open, MagicMock
+from unittest.mock import patch, MagicMock
 import socket
 
 from speeker.voice_prefs import (
@@ -19,54 +20,55 @@ from speeker.voice_prefs import (
     generate_sample,
     ensure_all_samples,
     SAMPLE_PHRASE,
-    SAMPLES_DIR,
 )
-from speeker.voices import DEFAULT_ENGINE, POCKET_TTS_VOICES, KOKORO_VOICES
+from speeker.voices import DEFAULT_ENGINE, POCKET_TTS_VOICES
 
 
 class TestGetVoicePrefs:
     """Tests for get_voice_prefs function."""
 
-    @patch("speeker.voice_prefs.PREFS_FILE")
-    @patch("speeker.voice_prefs.BUNDLED_PREFS_FILE")
-    def test_get_voice_prefs_returns_dict(self, mock_bundled, mock_prefs):
+    def test_get_voice_prefs_returns_dict(self, tmp_path):
         """Test returns a dictionary."""
-        mock_prefs.exists.return_value = False
-        mock_bundled.exists.return_value = False
-        result = get_voice_prefs()
-        assert isinstance(result, dict)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            with patch("speeker.voice_prefs.BUNDLED_PREFS_FILE") as mock_bundled:
+                mock_bundled.exists.return_value = False
+                result = get_voice_prefs()
+                assert isinstance(result, dict)
 
-    @patch("speeker.voice_prefs.PREFS_FILE")
-    @patch("speeker.voice_prefs.BUNDLED_PREFS_FILE")
-    def test_get_voice_prefs_default_structure(self, mock_bundled, mock_prefs):
+    def test_get_voice_prefs_default_structure(self, tmp_path):
         """Test default structure when no files exist."""
-        mock_prefs.exists.return_value = False
-        mock_bundled.exists.return_value = False
-        result = get_voice_prefs()
-        assert "pocket-tts" in result
-        assert "kokoro" in result
-        assert "default_engine" in result
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            with patch("speeker.voice_prefs.BUNDLED_PREFS_FILE") as mock_bundled:
+                mock_bundled.exists.return_value = False
+                result = get_voice_prefs()
+                assert "pocket-tts" in result
+                assert "kokoro" in result
+                assert "default_engine" in result
 
-    @patch("speeker.voice_prefs.PREFS_FILE")
-    @patch("builtins.open", new_callable=mock_open, read_data='{"pocket-tts": ["alba"], "kokoro": ["am_liam"], "default_engine": "kokoro"}')
-    def test_get_voice_prefs_loads_from_file(self, mock_file, mock_prefs):
+    def test_get_voice_prefs_loads_from_file(self, tmp_path):
         """Test loading preferences from file."""
-        mock_prefs.exists.return_value = True
-        result = get_voice_prefs()
-        assert result["pocket-tts"] == ["alba"]
-        assert result["kokoro"] == ["am_liam"]
-        assert result["default_engine"] == "kokoro"
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            # Write prefs file at the SPEEKER_DIR/config/ location
+            config = tmp_path / "config"
+            config.mkdir(parents=True)
+            prefs_file = config / "voice-prefs.json"
+            prefs_file.write_text('{"pocket-tts": ["alba"], "kokoro": ["am_liam"], "default_engine": "kokoro"}')
+            result = get_voice_prefs()
+            assert result["pocket-tts"] == ["alba"]
+            assert result["kokoro"] == ["am_liam"]
+            assert result["default_engine"] == "kokoro"
 
-    @patch("speeker.voice_prefs.PREFS_FILE")
-    @patch("speeker.voice_prefs.BUNDLED_PREFS_FILE")
-    @patch("builtins.open", new_callable=mock_open, read_data='invalid json')
-    def test_get_voice_prefs_handles_invalid_json(self, mock_file, mock_bundled, mock_prefs):
+    def test_get_voice_prefs_handles_invalid_json(self, tmp_path):
         """Test handles invalid JSON gracefully."""
-        mock_prefs.exists.return_value = True
-        mock_bundled.exists.return_value = False
-        result = get_voice_prefs()
-        # Should fall back to defaults
-        assert isinstance(result, dict)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            config = tmp_path / "config"
+            config.mkdir(parents=True)
+            prefs_file = config / "voice-prefs.json"
+            prefs_file.write_text("invalid json")
+            with patch("speeker.voice_prefs.BUNDLED_PREFS_FILE") as mock_bundled:
+                mock_bundled.exists.return_value = False
+                result = get_voice_prefs()
+                assert isinstance(result, dict)
 
 
 class TestSaveVoicePrefs:
@@ -76,18 +78,15 @@ class TestSaveVoicePrefs:
         """Test saving preferences creates valid JSON."""
         prefs = {"pocket-tts": ["azelma"], "kokoro": ["am_liam"], "default_engine": "pocket-tts"}
 
-        with patch("speeker.voice_prefs.CONFIG_DIR", tmp_path):
-            with patch("speeker.voice_prefs.PREFS_FILE", tmp_path / "voice-prefs.json"):
-                save_voice_prefs(prefs)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_voice_prefs(prefs)
 
-                # Verify file was created
-                prefs_file = tmp_path / "voice-prefs.json"
-                assert prefs_file.exists()
+            prefs_file = tmp_path / "config" / "voice-prefs.json"
+            assert prefs_file.exists()
 
-                # Verify valid JSON
-                with open(prefs_file) as f:
-                    loaded = json.load(f)
-                assert loaded == prefs
+            with open(prefs_file) as f:
+                loaded = json.load(f)
+            assert loaded == prefs
 
 
 class TestGetPreferredVoice:
@@ -147,7 +146,6 @@ class TestSampleExists:
     def test_sample_exists_mp3(self, mock_dir, tmp_path):
         """Test detects existing MP3 sample."""
         mock_dir.return_value = tmp_path
-        # Create MP3 file
         (tmp_path / "pocket-tts-azelma.mp3").touch()
         assert sample_exists("pocket-tts", "azelma") is True
 
@@ -155,7 +153,6 @@ class TestSampleExists:
     def test_sample_exists_wav(self, mock_dir, tmp_path):
         """Test detects existing WAV sample."""
         mock_dir.return_value = tmp_path
-        # Create WAV file
         (tmp_path / "pocket-tts-azelma.wav").touch()
         assert sample_exists("pocket-tts", "azelma") is True
 
@@ -216,33 +213,26 @@ class TestSamplePhrase:
 
     def test_sample_phrase_contains_variety(self):
         """Test sample phrase has varied sounds for voice testing."""
-        # Good sample phrases contain varied phonemes
         phrase_lower = SAMPLE_PHRASE.lower()
-        assert any(c in phrase_lower for c in "aeiou")  # Vowels
-        assert any(c in phrase_lower for c in "bcdfghjklmnpqrstvwxyz")  # Consonants
+        assert any(c in phrase_lower for c in "aeiou")
+        assert any(c in phrase_lower for c in "bcdfghjklmnpqrstvwxyz")
 
 
 class TestGetSamplesDir:
     """Tests for get_samples_dir function."""
 
-    @patch("speeker.voice_prefs.SAMPLES_DIR")
-    def test_get_samples_dir_creates_directory(self, mock_samples_dir, tmp_path):
+    def test_get_samples_dir_creates_directory(self, tmp_path):
         """Test creates directory if it doesn't exist."""
-        test_dir = tmp_path / "samples"
-        mock_samples_dir.__truediv__ = lambda self, x: test_dir / x
-        mock_samples_dir.mkdir = MagicMock()
-        mock_samples_dir.return_value = test_dir
-        # The actual SAMPLES_DIR path
-        with patch("speeker.voice_prefs.SAMPLES_DIR", test_dir):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result = get_samples_dir()
-            assert result == test_dir
-            # mkdir should have been called
-            assert test_dir.exists() or True  # mkdir was mocked
+            # SPEEKER_DIR/cache/voice-samples
+            expected = tmp_path / "cache" / "voice-samples"
+            assert result == expected
+            assert expected.exists()
 
-    @patch("speeker.voice_prefs.SAMPLES_DIR")
-    def test_get_samples_dir_returns_path(self, mock_samples_dir, tmp_path):
+    def test_get_samples_dir_returns_path(self, tmp_path):
         """Test returns a Path object."""
-        with patch("speeker.voice_prefs.SAMPLES_DIR", tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result = get_samples_dir()
             assert isinstance(result, Path)
 
@@ -263,20 +253,15 @@ class TestFindFreePort:
     def test_find_free_port_is_actually_free(self):
         """Test returned port can be bound."""
         port = find_free_port()
-        # Try to bind to the port to verify it's free
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            # Port should be bindable (it was just found free)
-            # Note: there's a small race condition here
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
-                pass  # May be taken in rare race condition
+                pass
 
     def test_find_free_port_different_calls(self):
         """Test multiple calls may return different ports."""
-        # This is probabilistic but should usually work
         ports = {find_free_port() for _ in range(5)}
-        # We should get at least some variety (unless system is very constrained)
         assert len(ports) >= 1
 
 
@@ -331,7 +316,6 @@ class TestCreateHtmlUi:
         }
         samples = {"pocket-tts": {}, "kokoro": {}}
         html = create_html_ui(samples)
-        # Should contain at least one voice from each engine
         assert "azelma" in html or any(v in html for v in POCKET_TTS_VOICES)
 
     @patch("speeker.voice_prefs.get_voice_prefs")
@@ -356,7 +340,6 @@ class TestCreateHtmlUi:
         }
         samples = {"pocket-tts": {}, "kokoro": {}}
         html = create_html_ui(samples)
-        # The kokoro radio should be checked
         assert 'value="kokoro"' in html
 
 
@@ -414,8 +397,7 @@ class TestEnsureAllSamples:
         mock_exists.return_value = False
         mock_path.return_value = None
         mock_gen.return_value = None
-        result = ensure_all_samples(quiet=True)
-        # Should have called generate_sample for each missing voice
+        ensure_all_samples(quiet=True)
         assert mock_gen.called
 
     @patch("speeker.voice_prefs.generate_sample")
@@ -427,24 +409,20 @@ class TestEnsureAllSamples:
         sample_path = tmp_path / "sample.wav"
         sample_path.touch()
         mock_path.return_value = sample_path
-        result = ensure_all_samples(quiet=True)
-        # Since all exist, generate_sample should not be called for generation
-        # (though it may be called - depends on path return)
+        ensure_all_samples(quiet=True)
 
 
 class TestVoicePrefsHandler:
     """Tests for VoicePrefsHandler HTTP request handler."""
 
-    def test_handler_get_root(self, tmp_path):
+    def test_handler_get_root(self):
         """Test GET / returns HTML."""
         from speeker.voice_prefs import VoicePrefsHandler
         from io import BytesIO
 
-        # Create a mock request
-        request = BytesIO()
         handler = VoicePrefsHandler.__new__(VoicePrefsHandler)
         handler.path = "/"
-        handler.request = request
+        handler.request = BytesIO()
         handler.client_address = ("127.0.0.1", 12345)
         handler.server = MagicMock()
         handler.wfile = BytesIO()
@@ -452,7 +430,6 @@ class TestVoicePrefsHandler:
         VoicePrefsHandler.html_content = "<html><body>Test</body></html>"
         VoicePrefsHandler.samples = {}
 
-        # Mock response methods
         handler.send_response = MagicMock()
         handler.send_header = MagicMock()
         handler.end_headers = MagicMock()
@@ -468,7 +445,6 @@ class TestVoicePrefsHandler:
         from speeker.voice_prefs import VoicePrefsHandler
         from io import BytesIO
 
-        # Create a sample file
         sample_file = tmp_path / "test.mp3"
         sample_file.write_bytes(b"fake mp3 content")
 
@@ -521,11 +497,10 @@ class TestVoicePrefsHandler:
 
         handler.send_response.assert_called_with(404)
 
-    def test_handler_post_save(self, tmp_path):
+    def test_handler_post_save(self):
         """Test POST /save saves preferences."""
         from speeker.voice_prefs import VoicePrefsHandler
         from io import BytesIO
-        import json
 
         body = json.dumps({
             "pocket-tts": ["azelma"],
@@ -595,7 +570,6 @@ class TestVoicePrefsHandler:
         from speeker.voice_prefs import VoicePrefsHandler
 
         handler = VoicePrefsHandler.__new__(VoicePrefsHandler)
-        # Should not raise or produce output
         handler.log_message("Test %s", "message")
 
 
@@ -608,7 +582,6 @@ class TestGenerateSampleSuccess:
         """Test generate_sample returns path on success."""
         mock_dir.return_value = tmp_path
 
-        # Create the generated file that speeker would create
         generated_file = tmp_path / "generated.wav"
         generated_file.write_bytes(b"fake audio")
 
@@ -619,8 +592,7 @@ class TestGenerateSampleSuccess:
 
         result = generate_sample("pocket-tts", "azelma", quiet=True)
 
-        # Should have renamed file
-        assert result is not None or result is None  # May fail if file doesn't exist
+        assert result is not None or result is None
 
     @patch("speeker.voice_prefs.subprocess.run")
     @patch("speeker.voice_prefs.get_samples_dir")
@@ -656,7 +628,6 @@ class TestRunVoicePrefsServer:
         mock_port.return_value = 8080
         mock_html.return_value = "<html></html>"
 
-        # Make serve_forever raise KeyboardInterrupt to exit
         mock_instance = MagicMock()
         mock_instance.serve_forever.side_effect = KeyboardInterrupt()
         mock_server.return_value = mock_instance

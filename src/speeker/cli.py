@@ -3,7 +3,6 @@
 
 import argparse
 import fcntl
-import os
 import re
 import select
 import shutil
@@ -16,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from scipy.io import wavfile
 
+from .paths import data_dir, audio_dir as _audio_dir, ensure_dir
 from .preprocessing import preprocess_for_tts
 from .voices import (
     DEFAULT_ENGINE,
@@ -37,31 +37,21 @@ if TYPE_CHECKING:
     from kokoro import KPipeline
     from pocket_tts import TTSModel
 
-# Default output directory (can be overridden with SPEEKER_DIR env var)
-DEFAULT_BASE_DIR = Path.home() / ".speeker"
-
 # Lazy-loaded TTS models (expensive to initialize)
 _pocket_tts_model: "TTSModel | None" = None
 _pocket_tts_voice_states: dict[str, Any] = {}
 _kokoro_pipeline: "KPipeline | None" = None
 
 
-def get_base_dir() -> Path:
-    """Get the base directory for speeker output."""
-    return Path(os.environ.get("SPEEKER_DIR", DEFAULT_BASE_DIR))
-
-
 def get_queue_file() -> Path:
     """Get the path to the queue file."""
-    return get_base_dir() / "queue"
+    return data_dir() / "queue"
 
 
 def ensure_output_dir() -> Path:
     """Ensure the output directory for today exists."""
     today = datetime.now().strftime("%Y-%m-%d")
-    output_dir = get_base_dir() / today
-    output_dir.mkdir(parents=True, exist_ok=True)
-    return output_dir
+    return ensure_dir(_audio_dir() / today)
 
 
 def get_pocket_tts_model() -> "TTSModel":
@@ -238,8 +228,7 @@ def start_player() -> None:
 
 def queue_for_playback(audio_path: Path) -> None:
     """Add audio file to the playback queue and ensure player is running."""
-    base_dir = get_base_dir()
-    base_dir.mkdir(parents=True, exist_ok=True)
+    ensure_dir(data_dir())
     queue_file = get_queue_file()
 
     with open(queue_file, "a") as f:
@@ -440,10 +429,10 @@ def cmd_play(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     """Handle the status command."""
-    base_dir = get_base_dir()
+    audio = _audio_dir()
     queue_file = get_queue_file()
 
-    print(f"Base directory: {base_dir}")
+    print(f"Data directory: {data_dir()}")
     print(f"Player running: {'yes' if is_player_running() else 'no'}")
 
     if queue_file.exists():
@@ -456,8 +445,8 @@ def cmd_status(args: argparse.Namespace) -> int:
     # Count audio files
     total_files = 0
     total_size = 0
-    if base_dir.exists():
-        for day_dir in base_dir.iterdir():
+    if audio.exists():
+        for day_dir in audio.iterdir():
             if day_dir.is_dir() and day_dir.name[0].isdigit():
                 for f in day_dir.iterdir():
                     if f.suffix in (".wav", ".mp3"):
@@ -502,8 +491,58 @@ def cmd_bundle_prefs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_voice_clone(args: argparse.Namespace) -> int:
+    """Handle the voice-clone command."""
+    from .voice_clone import clone_voice, get_custom_voices, delete_custom_voice
+
+    if args.list:
+        voices = get_custom_voices()
+        if not voices:
+            print("No custom voices found.", file=sys.stderr)
+            return 0
+        print(f"\nCustom voices ({len(voices)}):")
+        print("-" * 50)
+        for name, entry in voices.items():
+            desc = entry.get("description", "")
+            created = entry.get("created_at", "unknown")[:10]
+            print(f"  {name:<25} {desc}  ({created})")
+        print()
+        return 0
+
+    if args.delete:
+        if delete_custom_voice(args.delete):
+            print(f"Deleted voice: {args.delete}", file=sys.stderr)
+            return 0
+        else:
+            print(f"Voice not found: {args.delete}", file=sys.stderr)
+            return 1
+
+    if not args.name or not args.sources:
+        print("Error: NAME and at least one SOURCE are required", file=sys.stderr)
+        print("Usage: speeker voice-clone NAME SOURCE [SOURCE...] [--start N] [--duration N]", file=sys.stderr)
+        return 1
+
+    try:
+        path = clone_voice(
+            name=args.name,
+            sources=args.sources,
+            start_secs=args.start,
+            duration_secs=args.duration,
+            description=args.description,
+        )
+        print(f"Voice cloned: {args.name}", file=sys.stderr)
+        print(f"Audio saved to: {path}", file=sys.stderr)
+        return 0
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def main() -> int:
     """Main entry point."""
+    from .migrate import migrate
+    migrate()
+
     parser = argparse.ArgumentParser(
         prog="speeker",
         description="Text-to-speech CLI with multiple engines and voice options",
@@ -575,6 +614,32 @@ def main() -> int:
         help="Copy your voice preferences to bundled defaults (developer use)"
     )
     bundle_prefs_parser.set_defaults(func=cmd_bundle_prefs)
+
+    # voice-clone command
+    voice_clone_parser = subparsers.add_parser(
+        "voice-clone",
+        help="Clone a voice from audio/video files or URLs",
+    )
+    voice_clone_parser.add_argument("name", nargs="?", help="Name for the cloned voice")
+    voice_clone_parser.add_argument(
+        "sources", nargs="*", help="Audio/video file paths or URLs (YouTube supported)"
+    )
+    voice_clone_parser.add_argument(
+        "--start", type=float, default=0, help="Start time in seconds (default: 0)"
+    )
+    voice_clone_parser.add_argument(
+        "--duration", type=float, default=30, help="Duration in seconds (default: 30)"
+    )
+    voice_clone_parser.add_argument(
+        "--description", help="Description of the voice"
+    )
+    voice_clone_parser.add_argument(
+        "--list", action="store_true", help="List custom voices"
+    )
+    voice_clone_parser.add_argument(
+        "--delete", metavar="NAME", help="Delete a custom voice"
+    )
+    voice_clone_parser.set_defaults(func=cmd_voice_clone)
 
     args = parser.parse_args()
 

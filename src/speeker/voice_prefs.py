@@ -10,12 +10,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import CONFIG_DIR
+from .paths import config_dir, voice_prefs_file, voice_samples_dir, ensure_dir
 from .voices import POCKET_TTS_VOICES, KOKORO_VOICES, DEFAULT_ENGINE
 
 SAMPLE_PHRASE = "My name is Joe and I am trapped in a bubblegum factory! Help!"
-PREFS_FILE = CONFIG_DIR / "voice-prefs.json"
-SAMPLES_DIR = CONFIG_DIR / "voice-samples"
 
 # Bundled default preferences (will be populated by developer)
 BUNDLED_PREFS_FILE = Path(__file__).parent / "default-voice-prefs.json"
@@ -23,15 +21,15 @@ BUNDLED_PREFS_FILE = Path(__file__).parent / "default-voice-prefs.json"
 
 def get_samples_dir() -> Path:
     """Get the voice samples directory."""
-    SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-    return SAMPLES_DIR
+    return ensure_dir(voice_samples_dir())
 
 
 def get_voice_prefs() -> dict:
     """Load voice preferences from disk."""
-    if PREFS_FILE.exists():
+    prefs_file = voice_prefs_file()
+    if prefs_file.exists():
         try:
-            with open(PREFS_FILE) as f:
+            with open(prefs_file) as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
             pass
@@ -49,8 +47,8 @@ def get_voice_prefs() -> dict:
 
 def save_voice_prefs(prefs: dict) -> None:
     """Save voice preferences to disk."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(PREFS_FILE, "w") as f:
+    ensure_dir(config_dir())
+    with open(voice_prefs_file(), "w") as f:
         json.dump(prefs, f, indent=2)
 
 

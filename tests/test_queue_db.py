@@ -265,14 +265,14 @@ def temp_db(tmp_path, monkeypatch):
     """Create a temporary database for testing."""
     import speeker.queue_db as qdb
 
-    db_path = tmp_path / "test_queue.db"
-    monkeypatch.setattr(qdb, "DEFAULT_DB_PATH", db_path)
+    # Use SPEEKER_DIR so db_path() returns tmp_path/data/queue.db
+    monkeypatch.setenv("SPEEKER_DIR", str(tmp_path))
 
     # Clear thread-local connection
     if hasattr(qdb._local, "conn"):
         qdb._local.conn = None
 
-    yield db_path
+    yield tmp_path / "data" / "queue.db"
 
     # Cleanup
     if hasattr(qdb._local, "conn") and qdb._local.conn:

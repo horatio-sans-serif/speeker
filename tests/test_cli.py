@@ -7,55 +7,30 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 from speeker.cli import (
-    get_base_dir,
     get_queue_file,
     ensure_output_dir,
     is_player_running,
     start_player,
     queue_for_playback,
     speak_text,
-    DEFAULT_BASE_DIR,
     SENTENCE_END_PATTERN,
 )
-
-
-class TestGetBaseDir:
-    """Tests for get_base_dir function."""
-
-    def test_get_base_dir_default(self):
-        """Test returns default directory when env not set."""
-        with patch.dict(os.environ, {}, clear=True):
-            # Remove SPEEKER_DIR if present
-            os.environ.pop("SPEEKER_DIR", None)
-            result = get_base_dir()
-            assert result == DEFAULT_BASE_DIR
-
-    def test_get_base_dir_from_env(self):
-        """Test returns directory from environment variable."""
-        with patch.dict(os.environ, {"SPEEKER_DIR": "/custom/path"}):
-            result = get_base_dir()
-            assert result == Path("/custom/path")
-
-    def test_get_base_dir_returns_path(self):
-        """Test returns a Path object."""
-        result = get_base_dir()
-        assert isinstance(result, Path)
 
 
 class TestGetQueueFile:
     """Tests for get_queue_file function."""
 
-    def test_get_queue_file_path(self):
+    def test_get_queue_file_path(self, tmp_path):
         """Test returns queue file path."""
-        with patch("speeker.cli.get_base_dir") as mock_base:
-            mock_base.return_value = Path("/test/dir")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result = get_queue_file()
-            assert result == Path("/test/dir/queue")
+            assert result == tmp_path / "data" / "queue"
 
-    def test_get_queue_file_returns_path(self):
+    def test_get_queue_file_returns_path(self, tmp_path):
         """Test returns a Path object."""
-        result = get_queue_file()
-        assert isinstance(result, Path)
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            result = get_queue_file()
+            assert isinstance(result, Path)
 
 
 class TestEnsureOutputDir:
@@ -63,16 +38,14 @@ class TestEnsureOutputDir:
 
     def test_ensure_output_dir_creates_directory(self, tmp_path):
         """Test creates output directory."""
-        with patch("speeker.cli.get_base_dir") as mock_base:
-            mock_base.return_value = tmp_path
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result = ensure_output_dir()
             assert result.exists()
             assert result.is_dir()
 
     def test_ensure_output_dir_uses_date_format(self, tmp_path):
         """Test directory name is date formatted."""
-        with patch("speeker.cli.get_base_dir") as mock_base:
-            mock_base.return_value = tmp_path
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result = ensure_output_dir()
             # Should be in YYYY-MM-DD format
             assert len(result.name) == 10
@@ -81,8 +54,7 @@ class TestEnsureOutputDir:
 
     def test_ensure_output_dir_idempotent(self, tmp_path):
         """Test calling multiple times is safe."""
-        with patch("speeker.cli.get_base_dir") as mock_base:
-            mock_base.return_value = tmp_path
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             result1 = ensure_output_dir()
             result2 = ensure_output_dir()
             assert result1 == result2
@@ -101,8 +73,6 @@ class TestIsPlayerRunning:
     @patch("speeker.cli.subprocess.run")
     def test_is_player_running_running(self, mock_run):
         """Test returns True when player is running."""
-        # First call (pgrep) returns PID
-        # Second call (ps) returns state
         mock_run.side_effect = [
             MagicMock(returncode=0, stdout="12345\n"),
             MagicMock(returncode=0, stdout="S"),
@@ -135,7 +105,6 @@ class TestStartPlayer:
     def test_start_player_already_running(self, mock_running):
         """Test does nothing if player already running."""
         mock_running.return_value = True
-        # Should not raise and return early
         start_player()
         mock_running.assert_called_once()
 
@@ -156,7 +125,6 @@ class TestStartPlayer:
         """Test does nothing when player not found."""
         mock_running.return_value = False
         mock_which.return_value = None
-        # Also mock Path.exists to return False for fallback locations
         with patch.object(Path, "exists", return_value=False):
             start_player()
         mock_popen.assert_not_called()
@@ -169,7 +137,6 @@ class TestStartPlayer:
         mock_running.return_value = False
         mock_which.return_value = "/usr/bin/speeker-player"
         mock_popen.side_effect = OSError("Failed to start")
-        # Should not raise
         start_player()
 
 
@@ -204,24 +171,7 @@ class TestIsPlayerRunningEdgeCases:
             MagicMock(returncode=1, stdout=""),  # ps fails
         ]
         result = is_player_running()
-        # Empty state string means process check fails
         assert result is False
-
-
-class TestDefaultBaseDirConstant:
-    """Tests for DEFAULT_BASE_DIR constant."""
-
-    def test_default_base_dir_is_path(self):
-        """Test DEFAULT_BASE_DIR is a Path object."""
-        assert isinstance(DEFAULT_BASE_DIR, Path)
-
-    def test_default_base_dir_in_home(self):
-        """Test DEFAULT_BASE_DIR is in home directory."""
-        assert str(Path.home()) in str(DEFAULT_BASE_DIR)
-
-    def test_default_base_dir_has_speeker(self):
-        """Test DEFAULT_BASE_DIR contains speeker."""
-        assert "speeker" in str(DEFAULT_BASE_DIR).lower()
 
 
 class TestQueueForPlayback:
@@ -229,48 +179,43 @@ class TestQueueForPlayback:
 
     @patch("speeker.cli.start_player")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_queue_for_playback_writes_path(self, mock_base, mock_queue, mock_start, tmp_path):
+    def test_queue_for_playback_writes_path(self, mock_queue, mock_start, tmp_path):
         """Test queue_for_playback writes audio path to queue file."""
-        mock_base.return_value = tmp_path
-        queue_file = tmp_path / "queue"
-        mock_queue.return_value = queue_file
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            queue_file = tmp_path / "queue"
+            mock_queue.return_value = queue_file
 
-        audio_path = tmp_path / "test.wav"
-        audio_path.touch()
+            audio_path = tmp_path / "test.wav"
+            audio_path.touch()
 
-        queue_for_playback(audio_path)
+            queue_for_playback(audio_path)
 
-        assert queue_file.exists()
-        assert str(audio_path) in queue_file.read_text()
+            assert queue_file.exists()
+            assert str(audio_path) in queue_file.read_text()
 
     @patch("speeker.cli.start_player")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_queue_for_playback_starts_player(self, mock_base, mock_queue, mock_start, tmp_path):
+    def test_queue_for_playback_starts_player(self, mock_queue, mock_start, tmp_path):
         """Test queue_for_playback starts the player."""
-        mock_base.return_value = tmp_path
-        mock_queue.return_value = tmp_path / "queue"
-
-        queue_for_playback(tmp_path / "test.wav")
-
-        mock_start.assert_called_once()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            mock_queue.return_value = tmp_path / "queue"
+            queue_for_playback(tmp_path / "test.wav")
+            mock_start.assert_called_once()
 
     @patch("speeker.cli.start_player")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_queue_for_playback_appends(self, mock_base, mock_queue, mock_start, tmp_path):
+    def test_queue_for_playback_appends(self, mock_queue, mock_start, tmp_path):
         """Test queue_for_playback appends to existing queue."""
-        mock_base.return_value = tmp_path
-        queue_file = tmp_path / "queue"
-        mock_queue.return_value = queue_file
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            queue_file = tmp_path / "queue"
+            mock_queue.return_value = queue_file
 
-        queue_for_playback(tmp_path / "test1.wav")
-        queue_for_playback(tmp_path / "test2.wav")
+            queue_for_playback(tmp_path / "test1.wav")
+            queue_for_playback(tmp_path / "test2.wav")
 
-        content = queue_file.read_text()
-        assert "test1.wav" in content
-        assert "test2.wav" in content
+            content = queue_file.read_text()
+            assert "test1.wav" in content
+            assert "test2.wav" in content
 
 
 class TestSpeakText:
@@ -351,11 +296,8 @@ class TestSentenceEndPattern:
 
     def test_pattern_no_match_mid_word(self):
         """Test pattern doesn't match mid-word."""
-        # Pattern requires whitespace or end after punctuation
         match = SENTENCE_END_PATTERN.search("file.txt")
-        # This might match .t - let's check
         if match:
-            # It matches because . followed by t (which is followed by more)
             pass
 
     def test_pattern_matches_newline(self):
@@ -371,14 +313,13 @@ class TestCmdVoices:
         from speeker.cli import cmd_voices
 
         args = MagicMock()
-        args.engine = None  # List all engines
+        args.engine = None
 
         result = cmd_voices(args)
 
         assert result == 0
         captured = capsys.readouterr()
         assert "pocket-tts" in captured.out
-        # Should show default voice marker
         assert "*" in captured.out
 
     def test_cmd_voices_filter_by_engine(self, capsys):
@@ -436,68 +377,67 @@ class TestCmdStatus:
 
     @patch("speeker.cli.is_player_running")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_cmd_status_shows_info(self, mock_base, mock_queue, mock_running, tmp_path, capsys):
+    def test_cmd_status_shows_info(self, mock_queue, mock_running, tmp_path, capsys):
         """Test cmd_status shows status information."""
         from speeker.cli import cmd_status
 
-        mock_base.return_value = tmp_path
-        mock_queue.return_value = tmp_path / "queue"
-        mock_running.return_value = False
-        args = MagicMock()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            mock_queue.return_value = tmp_path / "queue"
+            mock_running.return_value = False
+            args = MagicMock()
 
-        result = cmd_status(args)
+            result = cmd_status(args)
 
-        assert result == 0
-        captured = capsys.readouterr()
-        assert "Base directory:" in captured.out
-        assert "Player running: no" in captured.out
-        assert "Queue length:" in captured.out
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "Data directory:" in captured.out
+            assert "Player running: no" in captured.out
+            assert "Queue length:" in captured.out
 
     @patch("speeker.cli.is_player_running")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_cmd_status_with_queue_items(self, mock_base, mock_queue, mock_running, tmp_path, capsys):
+    def test_cmd_status_with_queue_items(self, mock_queue, mock_running, tmp_path, capsys):
         """Test cmd_status shows queue items."""
         from speeker.cli import cmd_status
 
-        mock_base.return_value = tmp_path
-        queue_file = tmp_path / "queue"
-        queue_file.write_text("/path/to/audio1.wav\n/path/to/audio2.wav\n")
-        mock_queue.return_value = queue_file
-        mock_running.return_value = True
-        args = MagicMock()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            queue_file = tmp_path / "queue"
+            queue_file.write_text("/path/to/audio1.wav\n/path/to/audio2.wav\n")
+            mock_queue.return_value = queue_file
+            mock_running.return_value = True
+            args = MagicMock()
 
-        result = cmd_status(args)
+            result = cmd_status(args)
 
-        assert result == 0
-        captured = capsys.readouterr()
-        assert "Queue length: 2" in captured.out
-        assert "Player running: yes" in captured.out
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "Queue length: 2" in captured.out
+            assert "Player running: yes" in captured.out
 
     @patch("speeker.cli.is_player_running")
     @patch("speeker.cli.get_queue_file")
-    @patch("speeker.cli.get_base_dir")
-    def test_cmd_status_counts_audio_files(self, mock_base, mock_queue, mock_running, tmp_path, capsys):
+    def test_cmd_status_counts_audio_files(self, mock_queue, mock_running, tmp_path, capsys):
         """Test cmd_status counts audio files."""
         from speeker.cli import cmd_status
 
-        mock_base.return_value = tmp_path
-        mock_queue.return_value = tmp_path / "queue"
-        mock_running.return_value = False
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            mock_queue.return_value = tmp_path / "queue"
+            mock_running.return_value = False
 
-        # Create some audio files in a date directory
-        day_dir = tmp_path / "2024-01-15"
-        day_dir.mkdir()
-        (day_dir / "test1.wav").write_bytes(b"x" * 1000)
-        (day_dir / "test2.mp3").write_bytes(b"x" * 2000)
+            # audio_dir() returns SPEEKER_DIR/data/audio
+            ad = tmp_path / "data" / "audio"
+            ad.mkdir(parents=True)
+            day_dir = ad / "2024-01-15"
+            day_dir.mkdir()
+            (day_dir / "test1.wav").write_bytes(b"x" * 1000)
+            (day_dir / "test2.mp3").write_bytes(b"x" * 2000)
 
-        args = MagicMock()
-        result = cmd_status(args)
+            args = MagicMock()
+            result = cmd_status(args)
 
-        assert result == 0
-        captured = capsys.readouterr()
-        assert "Audio files: 2" in captured.out
+            assert result == 0
+            captured = capsys.readouterr()
+            assert "Audio files: 2" in captured.out
 
 
 class TestCmdSpeak:
@@ -667,7 +607,6 @@ class TestCmdBundlePrefs:
         mock_prefs.return_value = {"pocket-tts": ["azelma"], "kokoro": []}
         bundled_file = tmp_path / "bundled.json"
 
-        # Temporarily override BUNDLED_PREFS_FILE
         original = cli.BUNDLED_PREFS_FILE
         cli.BUNDLED_PREFS_FILE = bundled_file
 
@@ -726,7 +665,6 @@ class TestSaveAudio:
 
                 assert path.exists()
                 assert path.suffix == ".wav"
-                # Check text file was created
                 txt_path = path.with_suffix(".txt")
                 assert txt_path.exists()
                 assert txt_path.read_text() == "Test text"
@@ -741,7 +679,6 @@ class TestSaveAudio:
         mock_which.return_value = "/usr/bin/ffmpeg"
 
         def run_side_effect(cmd, **kwargs):
-            # Create the MP3 file
             mp3_path = Path(cmd[-1])
             mp3_path.write_bytes(b"fake mp3 data")
             return MagicMock(returncode=0)
@@ -789,7 +726,6 @@ class TestSaveAudio:
             audio = np.zeros(1000, dtype=np.float32)
             path = save_audio(audio, 22050, "Test text")
 
-            # Should fall back to WAV
             assert path.suffix == ".wav"
 
 
@@ -822,7 +758,6 @@ class TestSpeakTextAdvanced:
         result = speak_text("Hello", "pocket-tts", "azelma", False, False, True)
 
         assert result is True
-        # wavfile.write should be called with stdout buffer
         mock_wavfile_write.assert_called_once()
 
 
@@ -857,7 +792,7 @@ class TestCmdSpeakStream:
         from speeker.cli import cmd_speak_stream
 
         mock_stream.return_value = iter(["First sentence.", "Second sentence."])
-        mock_speak.side_effect = [False, True]  # First fails, second succeeds
+        mock_speak.side_effect = [False, True]
 
         args = MagicMock()
         args.engine = "pocket-tts"
@@ -868,7 +803,6 @@ class TestCmdSpeakStream:
 
         result = cmd_speak_stream(args)
 
-        # Should succeed since at least one sentence was spoken
         assert result == 0
 
     def test_cmd_speak_stream_invalid_engine(self, capsys):
@@ -913,12 +847,7 @@ class TestStartPlayerFallback:
         mock_running.return_value = False
         mock_which.return_value = None
 
-        # Create a fake player in the fallback location
-        local_bin = Path.home() / ".local/bin"
         with patch.object(Path, "exists") as mock_exists:
             mock_exists.return_value = True
-
             start_player()
-
-            # Should have attempted to start player
             mock_popen.assert_called_once()

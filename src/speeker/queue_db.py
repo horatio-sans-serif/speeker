@@ -11,9 +11,7 @@ from typing import Iterator
 import numpy as np
 
 from .config import is_semantic_search_enabled, get_embedding_model, get_embedding_cache_dir
-
-# Default database location
-DEFAULT_DB_PATH = Path.home() / ".speeker" / "queue.db"
+from .paths import db_path as _db_path, ensure_dir
 
 # Lazy-loaded embedding model
 _embedding_model = None
@@ -25,9 +23,9 @@ _local = threading.local()
 
 def get_db_path() -> Path:
     """Get the database path, creating parent directory if needed."""
-    db_path = DEFAULT_DB_PATH
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return db_path
+    p = _db_path()
+    ensure_dir(p.parent)
+    return p
 
 
 @contextmanager
