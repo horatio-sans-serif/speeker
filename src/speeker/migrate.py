@@ -4,8 +4,10 @@ Runs once (marker file .migrated_v2 in data_dir).  Skipped when SPEEKER_DIR
 is set.  Moves files; does not overwrite existing destinations.
 """
 
+import fcntl
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 
@@ -53,7 +55,7 @@ def _migrate_data() -> None:
     if _LEGACY_BASE.exists():
         audio_dst = paths.audio_dir()
         for child in _LEGACY_BASE.iterdir():
-            if child.is_dir() and len(child.name) == 10 and child.name[4] == "-":
+            if child.is_dir() and re.fullmatch(r"\d{4}-\d{2}-\d{2}", child.name):
                 _move(child, audio_dst / child.name)
 
         # audio/ subdir (newer layout already used audio/)
@@ -96,23 +98,46 @@ def _cleanup_stale() -> None:
 
 
 def migrate() -> None:
-    """Run one-time migration if needed.  Safe to call on every startup."""
+    """Run one-time migration if needed.  Safe to call on every startup.
+
+    Uses a file lock to prevent concurrent migrations from multiple processes
+    starting simultaneously.
+    """
     if not _needs_migration():
         return
 
-    log.info("Migrating legacy paths to XDG layout...")
+    # Acquire an exclusive lock to prevent two processes migrating at once
+    lock_dir = paths.data_dir()
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = lock_dir / ".migrate.lock"
 
     try:
+        fd = open(lock_file, "w")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        log.debug("Another process is migrating; skipping.")
+        return
+
+    try:
+        # Re-check after acquiring lock (another process may have finished)
+        if _marker_path().exists():
+            return
+
+        log.info("Migrating legacy paths to XDG layout...")
+
         _migrate_data()
         _migrate_cache()
         _migrate_config()
         _cleanup_stale()
+
+        # Write marker so we don't run again
+        marker = _marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("migrated")
+        log.info("Migration complete.")
     except Exception:
         log.warning("Migration encountered errors; will retry next launch", exc_info=True)
-        return
-
-    # Write marker so we don't run again
-    marker = _marker_path()
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text("migrated")
-    log.info("Migration complete.")
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+        lock_file.unlink(missing_ok=True)

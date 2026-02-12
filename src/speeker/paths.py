@@ -14,9 +14,17 @@ _APP_NAME = "speeker"
 
 
 def _override_root() -> Path | None:
-    """Return the SPEEKER_DIR override path, or None."""
+    """Return the SPEEKER_DIR override path, or None.
+
+    The path is resolved to an absolute path to prevent traversal issues.
+    """
     val = os.environ.get("SPEEKER_DIR")
-    return Path(val) if val else None
+    if not val:
+        return None
+    p = Path(val).resolve()
+    if not p.is_absolute():
+        return None
+    return p
 
 
 # -- Config ------------------------------------------------------------------
