@@ -45,7 +45,6 @@ from .queue_db import (
 PAUSE_BETWEEN_MESSAGES = 0.3
 PAUSE_BETWEEN_SESSIONS = 0.5
 POLL_INTERVAL = 0.5  # Check queue every 500ms
-IDLE_TIMEOUT = 300  # Exit after 5 minutes of no activity
 
 # How long before we re-announce "This is Claude Code"
 ANNOUNCE_THRESHOLD_MINUTES = 30
@@ -116,6 +115,13 @@ def get_audio_player() -> list[str] | None:
 
 
 AUDIO_PLAYER = get_audio_player()
+
+
+def unload_tts_model() -> None:
+    """Unload the TTS model to free memory."""
+    global _tts_model, _voice_states
+    _tts_model = None
+    _voice_states = {}
 
 
 def get_tts_model() -> "TTSModel":
@@ -574,6 +580,8 @@ def release_lock(lock_path: Path) -> None:
 
 def run_daemon(verbose: bool = False) -> None:
     """Run as a daemon - watch queue and process items immediately."""
+    from .config import get_player_config
+
     lock_path = acquire_lock()
     if lock_path is None:
         print("[ERROR] Another speeker-player daemon is already running", file=sys.stderr)
@@ -582,15 +590,21 @@ def run_daemon(verbose: bool = False) -> None:
     if verbose:
         print("[INFO] Speeker player daemon starting...", file=sys.stderr)
 
-    # Pre-warm the TTS model
-    if verbose:
-        print("[INFO] Warming up TTS model...", file=sys.stderr)
-    get_tts_model()
-    get_voice_state("azelma")  # Default voice
-    if verbose:
-        print("[INFO] TTS model ready!", file=sys.stderr)
+    idle_timeout = get_player_config().get("model_idle_timeout_minutes", 0)
+
+    # Pre-warm the TTS model unless configured to lazy-load
+    if idle_timeout == 0:
+        if verbose:
+            print("[INFO] Warming up TTS model...", file=sys.stderr)
+        get_tts_model()
+        get_voice_state("azelma")  # Default voice
+        if verbose:
+            print("[INFO] TTS model ready!", file=sys.stderr)
+    elif verbose:
+        print(f"[INFO] Model idle timeout: {idle_timeout} min (lazy-load)", file=sys.stderr)
 
     last_activity = time.time()
+    model_loaded = idle_timeout == 0
 
     try:
         while True:
@@ -601,12 +615,13 @@ def run_daemon(verbose: bool = False) -> None:
                     print(f"[INFO] Processing {pending} pending item(s)", file=sys.stderr)
                 process_queue(verbose)
                 last_activity = time.time()
-            else:
-                # Check for idle timeout
-                if time.time() - last_activity > IDLE_TIMEOUT:
+                model_loaded = True
+            elif model_loaded and idle_timeout > 0:
+                if time.time() - last_activity > idle_timeout * 60:
+                    unload_tts_model()
+                    model_loaded = False
                     if verbose:
-                        print("[INFO] Idle timeout, exiting", file=sys.stderr)
-                    break
+                        print("[INFO] TTS model unloaded (idle)", file=sys.stderr)
 
             time.sleep(POLL_INTERVAL)
     finally:

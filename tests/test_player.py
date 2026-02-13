@@ -15,9 +15,9 @@ from speeker.player import (
     play_audio,
     should_announce_intro,
     build_session_script,
+    unload_tts_model,
     NOTE_PATTERN,
     POLL_INTERVAL,
-    IDLE_TIMEOUT,
     PAUSE_BETWEEN_MESSAGES,
     PAUSE_BETWEEN_SESSIONS,
     ANNOUNCE_THRESHOLD_MINUTES,
@@ -213,10 +213,6 @@ class TestConstants:
         """Test poll interval is a reasonable value."""
         assert 0 < POLL_INTERVAL <= 2.0
 
-    def test_idle_timeout_reasonable(self):
-        """Test idle timeout is a reasonable value."""
-        assert 60 <= IDLE_TIMEOUT <= 600
-
     def test_pause_between_messages_reasonable(self):
         """Test pause between messages is a reasonable value."""
         assert 0 <= PAUSE_BETWEEN_MESSAGES <= 2.0
@@ -224,6 +220,34 @@ class TestConstants:
     def test_pause_between_sessions_reasonable(self):
         """Test pause between sessions is a reasonable value."""
         assert 0 <= PAUSE_BETWEEN_SESSIONS <= 2.0
+
+
+class TestUnloadTtsModel:
+    """Tests for unload_tts_model function."""
+
+    def test_unload_clears_globals(self):
+        """Test unload_tts_model clears model and voice states."""
+        import speeker.player as player
+
+        player._tts_model = MagicMock()
+        player._voice_states = {"azelma": MagicMock()}
+
+        unload_tts_model()
+
+        assert player._tts_model is None
+        assert player._voice_states == {}
+
+    def test_unload_when_already_none(self):
+        """Test unload_tts_model is safe when model is already None."""
+        import speeker.player as player
+
+        player._tts_model = None
+        player._voice_states = {}
+
+        unload_tts_model()
+
+        assert player._tts_model is None
+        assert player._voice_states == {}
 
 
 class TestGetAudioPlayerLinux:
@@ -841,10 +865,14 @@ class TestRunDaemon:
     @patch("speeker.player.get_tts_model")
     @patch("speeker.player.release_lock")
     @patch("speeker.player.acquire_lock")
-    def test_run_daemon_starts(self, mock_acquire, mock_release, mock_model, mock_voice, mock_pending, mock_sleep, tmp_path):
-        """Test run_daemon starts and warms up model."""
+    @patch("speeker.config.get_player_config")
+    def test_run_daemon_preloads_when_timeout_zero(
+        self, mock_config, mock_acquire, mock_release, mock_model, mock_voice, mock_pending, mock_sleep, tmp_path
+    ):
+        """Test run_daemon preloads model when model_idle_timeout_minutes is 0."""
         from speeker.player import run_daemon
 
+        mock_config.return_value = {"model_idle_timeout_minutes": 0}
         lock_path = tmp_path / "player.lock"
         mock_acquire.return_value = lock_path
         mock_pending.return_value = 0
@@ -857,22 +885,100 @@ class TestRunDaemon:
 
         mock_sleep.side_effect = sleep_side_effect
 
-        with patch("speeker.player.IDLE_TIMEOUT", 0.001):
-            with patch("speeker.player.time.time") as mock_time:
-                mock_time.return_value = 0
-                try:
-                    run_daemon(verbose=False)
-                except KeyboardInterrupt:
-                    pass
+        try:
+            run_daemon(verbose=False)
+        except KeyboardInterrupt:
+            pass
 
         mock_model.assert_called_once()
+        mock_voice.assert_called_once_with("azelma")
         mock_release.assert_called()
 
+    @patch("speeker.player.time.sleep")
+    @patch("speeker.player.get_pending_count")
+    @patch("speeker.player.get_tts_model")
+    @patch("speeker.player.release_lock")
     @patch("speeker.player.acquire_lock")
-    def test_run_daemon_already_running(self, mock_acquire, capsys):
+    @patch("speeker.config.get_player_config")
+    def test_run_daemon_skips_preload_with_timeout(
+        self, mock_config, mock_acquire, mock_release, mock_model, mock_pending, mock_sleep, tmp_path
+    ):
+        """Test run_daemon skips model preload when idle timeout is set."""
+        from speeker.player import run_daemon
+
+        mock_config.return_value = {"model_idle_timeout_minutes": 5}
+        lock_path = tmp_path / "player.lock"
+        mock_acquire.return_value = lock_path
+        mock_pending.return_value = 0
+
+        call_count = [0]
+        def sleep_side_effect(duration):
+            call_count[0] += 1
+            if call_count[0] >= 2:
+                raise KeyboardInterrupt()
+
+        mock_sleep.side_effect = sleep_side_effect
+
+        try:
+            run_daemon(verbose=False)
+        except KeyboardInterrupt:
+            pass
+
+        mock_model.assert_not_called()
+
+    @patch("speeker.player.unload_tts_model")
+    @patch("speeker.player.process_queue")
+    @patch("speeker.player.time.sleep")
+    @patch("speeker.player.get_pending_count")
+    @patch("speeker.player.get_tts_model")
+    @patch("speeker.player.release_lock")
+    @patch("speeker.player.acquire_lock")
+    @patch("speeker.config.get_player_config")
+    def test_run_daemon_unloads_model_after_idle(
+        self, mock_config, mock_acquire, mock_release, mock_model, mock_pending,
+        mock_sleep, mock_process, mock_unload, tmp_path
+    ):
+        """Test daemon unloads model after idle timeout expires."""
+        from speeker.player import run_daemon
+
+        mock_config.return_value = {"model_idle_timeout_minutes": 1}
+        lock_path = tmp_path / "player.lock"
+        mock_acquire.return_value = lock_path
+
+        # Simulate: first call has pending items (loads model), then idle
+        pending_values = [1, 0, 0]
+        mock_pending.side_effect = lambda: pending_values.pop(0) if pending_values else 0
+
+        time_values = [0, 0, 0, 61, 61]  # start, after process, check, idle check, idle check
+        time_idx = [0]
+        def fake_time():
+            idx = min(time_idx[0], len(time_values) - 1)
+            time_idx[0] += 1
+            return time_values[idx]
+
+        call_count = [0]
+        def sleep_side_effect(duration):
+            call_count[0] += 1
+            if call_count[0] >= 3:
+                raise KeyboardInterrupt()
+
+        mock_sleep.side_effect = sleep_side_effect
+
+        with patch("speeker.player.time.time", side_effect=fake_time):
+            try:
+                run_daemon(verbose=False)
+            except KeyboardInterrupt:
+                pass
+
+        mock_unload.assert_called_once()
+
+    @patch("speeker.player.acquire_lock")
+    @patch("speeker.config.get_player_config")
+    def test_run_daemon_already_running(self, mock_config, mock_acquire, capsys):
         """Test run_daemon exits if already running."""
         from speeker.player import run_daemon
 
+        mock_config.return_value = {"model_idle_timeout_minutes": 0}
         mock_acquire.return_value = None
 
         with pytest.raises(SystemExit) as exc_info:

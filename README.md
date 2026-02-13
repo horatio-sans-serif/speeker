@@ -170,9 +170,18 @@ Config file location (macOS: `~/Library/Application Support/speeker/config.json`
     "enabled": false,
     "model": "all-MiniLM-L6-v2",
     "cache_dir": null
+  },
+  "player": {
+    "model_idle_timeout_minutes": 0
   }
 }
 ```
+
+| Setting                      | Default | Description                                         |
+| ---------------------------- | ------- | --------------------------------------------------- |
+| `model_idle_timeout_minutes` | 0       | Minutes idle before unloading TTS model (0 = never) |
+
+When `model_idle_timeout_minutes` is 0 (default), the daemon preloads the TTS model at startup and keeps it in memory. Set to a positive value (e.g., 5) to unload the model after that many minutes of inactivity -- the model reloads automatically on the next request.
 
 ### Settings (via Web UI or API)
 

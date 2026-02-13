@@ -16,6 +16,9 @@ DEFAULT_CONFIG = {
         "api_key": None,  # Required for anthropic/openai
         "model": None,  # Model name (default per backend if None)
     },
+    "player": {
+        "model_idle_timeout_minutes": 0,  # 0 = never unload
+    },
 }
 
 
@@ -66,6 +69,12 @@ def get_embedding_cache_dir() -> str | None:
     """Get the configured cache directory for embedding models."""
     config = get_config()
     return config.get("semantic_search", {}).get("cache_dir")
+
+
+def get_player_config() -> dict:
+    """Get player configuration."""
+    config = get_config()
+    return config.get("player", {})
 
 
 def get_llm_config() -> dict:

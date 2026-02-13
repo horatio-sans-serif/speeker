@@ -16,9 +16,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-test = [
-    "faster-whisper>=1.2.1",
-]
 semantic = [
     "sentence-transformers>=2.2.0",
 ]
