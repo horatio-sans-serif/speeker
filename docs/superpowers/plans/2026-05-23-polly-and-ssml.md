@@ -2476,7 +2476,9 @@ def generate_ssml(text: str, purpose: str = "audiobook") -> str:
     if backend:
         try:
             response = call_llm(build_prompt(text, purpose))
-            if response and response.strip():
+            # Only trust output that actually produced SSML markup; otherwise the
+            # sanitizer would happily escape garbage like "<<<>>>" into text.
+            if response and "<speak" in response.lower():
                 sanitized = sanitize_ssml(_extract_ssml(response))
                 if _has_content(sanitized):
                     return sanitized
