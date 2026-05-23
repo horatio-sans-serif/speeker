@@ -52,3 +52,41 @@ class TestRuleBasedSsml:
     def test_escapes_specials(self):
         out = rule_based_ssml("Tom & Jerry", "audiobook")
         assert "Tom &amp; Jerry" in out
+
+
+from unittest.mock import patch
+from speeker import ssml_generate
+from speeker.ssml_generate import generate_ssml
+
+
+class TestGenerateSsml:
+    def test_unknown_purpose_raises(self):
+        import pytest
+        with pytest.raises(ValueError):
+            generate_ssml("hi", purpose="bogus")
+
+    def test_empty_text(self):
+        assert generate_ssml("   ", purpose="audiobook") == "<speak></speak>"
+
+    def test_no_backend_falls_back_to_rule_based(self):
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("", "", "", "")):
+            out = generate_ssml("Para one.\n\nPara two.", purpose="audiobook")
+        assert '<prosody rate="95%">' in out
+
+    def test_llm_output_sanitized_and_used(self):
+        llm = '```xml\n<speak>Hi <script>x</script><break time="500ms"/>there</speak>\n```'
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value=llm):
+            out = generate_ssml("whatever", purpose="conversational")
+        assert out.startswith("<speak>") and out.endswith("</speak>")
+        assert "<script>" not in out
+        assert '<break time="500ms"/>' in out
+
+    def test_invalid_llm_output_falls_back(self):
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value="<<<>>>"):
+            out = generate_ssml("Para one.\n\nPara two.", purpose="audiobook")
+        assert '<prosody rate="95%">' in out  # came from rule-based fallback

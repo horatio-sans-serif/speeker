@@ -104,3 +104,73 @@ def rule_based_ssml(text: str, purpose: str = "audiobook") -> str:
         body = '<break time="500ms"/>' + body
     ssml = f'<speak><prosody rate="{preset["rate"]}">{body}</prosody></speak>'
     return sanitize_ssml(ssml)
+
+
+from .summarize import call_llm, _get_llm_settings  # noqa: E402
+from .ssml import strip_ssml  # noqa: E402
+
+_CODE_FENCE_RE = re.compile(r"```(?:xml|ssml)?\s*(.*?)\s*```", re.DOTALL)
+_SPEAK_BLOCK_RE = re.compile(r"<speak\b.*?</speak>", re.DOTALL | re.IGNORECASE)
+
+SSML_PROMPT_TEMPLATE = """Convert the text below into Amazon Polly SSML for {purpose} delivery.
+
+Style: {style}
+
+Rules:
+- Output ONLY SSML wrapped in a single <speak> element. No explanation, no code fences.
+- Use only these tags: speak, p, s, break, emphasis, prosody, say-as, sub.
+- Do not change the wording; only add markup and pacing.
+
+Text:
+{text}
+
+SSML:"""
+
+
+def _extract_ssml(response: str) -> str:
+    """Pull SSML out of an LLM response (strip code fences, prefer <speak> block)."""
+    fence = _CODE_FENCE_RE.search(response)
+    if fence:
+        response = fence.group(1)
+    block = _SPEAK_BLOCK_RE.search(response)
+    if block:
+        return block.group(0)
+    return response.strip()
+
+
+def _has_content(ssml: str) -> bool:
+    """True if the sanitized SSML carries any spoken text."""
+    return bool(strip_ssml(ssml).strip())
+
+
+def build_prompt(text: str, purpose: str) -> str:
+    preset = PURPOSE_PRESETS[purpose]
+    return SSML_PROMPT_TEMPLATE.format(
+        purpose=purpose, style=preset["description"], text=text
+    )
+
+
+def generate_ssml(text: str, purpose: str = "audiobook") -> str:
+    """Generate purpose-tuned SSML from plain text (hybrid LLM + rule-based)."""
+    purpose = resolve_purpose(purpose)
+    if purpose not in PURPOSE_PRESETS:
+        valid = ", ".join(sorted(set(PURPOSE_PRESETS) | set(PURPOSE_ALIASES)))
+        raise ValueError(f"Unknown purpose '{purpose}'. Valid: {valid}")
+
+    if not text or not text.strip():
+        return "<speak></speak>"
+
+    backend = _get_llm_settings()[0]
+    if backend:
+        try:
+            response = call_llm(build_prompt(text, purpose))
+            # Only trust output that actually produced SSML markup; otherwise the
+            # sanitizer would happily escape garbage like "<<<>>>" into text.
+            if response and "<speak" in response.lower():
+                sanitized = sanitize_ssml(_extract_ssml(response))
+                if _has_content(sanitized):
+                    return sanitized
+        except Exception:
+            pass  # fall through to rule-based
+
+    return rule_based_ssml(text, purpose)
