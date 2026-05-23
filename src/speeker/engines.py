@@ -131,6 +131,62 @@ class KokoroEngine(BaseEngine):
         self._pipeline = None
 
 
+class PollyEngine(BaseEngine):
+    name = "polly"
+    supports_ssml = True
+
+    def __init__(self) -> None:
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            import boto3
+            from .config import get_polly_config
+            cfg = get_polly_config()
+            session_kwargs = {}
+            if cfg.get("profile"):
+                session_kwargs["profile_name"] = cfg["profile"]
+            session = boto3.Session(**session_kwargs)
+            client_kwargs = {}
+            if cfg.get("region"):
+                client_kwargs["region_name"] = cfg["region"]
+            self._client = session.client("polly", **client_kwargs)
+        return self._client
+
+    def default_voice(self) -> str:
+        from .voices import DEFAULT_POLLY_VOICE
+        return DEFAULT_POLLY_VOICE
+
+    def list_voices(self) -> dict[str, str]:
+        from .voices import POLLY_VOICES
+        return dict(POLLY_VOICES)
+
+    def validate_voice(self, voice: str) -> bool:
+        from .voices import validate_voice
+        return validate_voice("polly", voice)
+
+    def generate(self, text, voice, *, is_ssml=False, **options):
+        from .config import get_polly_config
+        from .ssml import ensure_speak_wrapped
+        cfg = get_polly_config()
+        variant = options.get("polly_engine") or cfg.get("engine") or "neural"
+        if is_ssml:
+            payload, text_type = ensure_speak_wrapped(text), "ssml"
+        else:
+            payload, text_type = text, "text"
+        resp = self._get_client().synthesize_speech(
+            Text=payload,
+            VoiceId=voice,
+            Engine=variant,
+            OutputFormat="pcm",
+            SampleRate="16000",
+            TextType=text_type,
+        )
+        pcm = resp["AudioStream"].read()
+        audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        return audio, 16000
+
+
 _ENGINES: dict[str, BaseEngine] = {}
 
 
@@ -139,6 +195,8 @@ def _create_engine(name: str) -> BaseEngine:
         return PocketTTSEngine()
     if name == "kokoro":
         return KokoroEngine()
+    if name == "polly":
+        return PollyEngine()
     raise ValueError(f"Unknown engine: {name}")
 
 
