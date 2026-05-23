@@ -470,7 +470,6 @@ def process_queue(verbose: bool = False) -> int:
 
         # Get settings for this session
         settings = get_settings(session_id)
-        voice = settings["voice"]
         speed = settings["speed"]
 
         if session_idx > 0:
