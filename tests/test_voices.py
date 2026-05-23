@@ -62,12 +62,14 @@ class TestGetVoices:
         result = get_voices()
         assert "pocket-tts" in result
         assert "kokoro" in result
+        assert "polly" in result
 
     def test_get_voices_none_filter_returns_both(self):
         """Test None engine filter returns both engines."""
         result = get_voices(engine=None)
         assert "pocket-tts" in result
         assert "kokoro" in result
+        assert "polly" in result
 
     def test_get_voices_pocket_tts_filter(self):
         """Test pocket-tts filter returns only pocket-tts."""
