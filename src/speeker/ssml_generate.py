@@ -144,6 +144,7 @@ def _has_content(ssml: str) -> bool:
 
 
 def build_prompt(text: str, purpose: str) -> str:
+    purpose = resolve_purpose(purpose)
     preset = PURPOSE_PRESETS[purpose]
     return SSML_PROMPT_TEMPLATE.format(
         purpose=purpose, style=preset["description"], text=text

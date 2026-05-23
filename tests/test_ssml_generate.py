@@ -60,6 +60,12 @@ from speeker.ssml_generate import generate_ssml
 
 
 class TestGenerateSsml:
+    def test_build_prompt_resolves_alias(self):
+        from speeker.ssml_generate import build_prompt
+        prompt = build_prompt("Hello.", "news")  # alias for "article"
+        assert "Hello." in prompt
+        assert "article" in prompt
+
     def test_unknown_purpose_raises(self):
         import pytest
         with pytest.raises(ValueError):
