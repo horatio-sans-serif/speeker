@@ -4,9 +4,13 @@
 from speeker.voices import (
     POCKET_TTS_VOICES,
     KOKORO_VOICES,
+    POLLY_VOICES,
     DEFAULT_ENGINE,
     DEFAULT_POCKET_TTS_VOICE,
     DEFAULT_KOKORO_VOICE,
+    DEFAULT_POLLY_VOICE,
+    DEFAULT_POLLY_ENGINE,
+    POLLY_VARIANT_DEFAULT_VOICE,
     get_voices,
     get_default_voice,
     validate_voice,
@@ -180,3 +184,36 @@ class TestGetPocketTtsVoicePath:
     def test_get_pocket_tts_voice_path_case_sensitive(self):
         """Test voice path lookup is case-sensitive."""
         assert get_pocket_tts_voice_path("Azelma") == DEFAULT_POCKET_TTS_VOICE
+
+
+class TestPollyVoices:
+    """Tests for Polly voice support."""
+
+    def test_default_voice_constant(self):
+        """Test default Polly voice constant."""
+        assert DEFAULT_POLLY_VOICE == "Joanna"
+        assert DEFAULT_POLLY_VOICE in POLLY_VOICES
+
+    def test_default_engine_variant(self):
+        """Test default Polly engine variant."""
+        assert DEFAULT_POLLY_ENGINE == "neural"
+
+    def test_variant_defaults(self):
+        """Test Polly variant-specific default voices."""
+        assert POLLY_VARIANT_DEFAULT_VOICE["long-form"] == "Danielle"
+        assert POLLY_VARIANT_DEFAULT_VOICE["generative"] == "Ruth"
+
+    def test_get_voices_includes_polly(self):
+        """Test get_voices includes Polly when requested."""
+        voices = get_voices("polly")
+        assert "polly" in voices
+        assert "Joanna" in voices["polly"]
+
+    def test_get_default_voice_polly(self):
+        """Test get_default_voice returns Polly default."""
+        assert get_default_voice("polly") == "Joanna"
+
+    def test_validate_voice_polly_lenient(self):
+        """Test Polly voice validation is lenient (any non-empty string)."""
+        assert validate_voice("polly", "AnyNewPollyVoice") is True
+        assert validate_voice("polly", "") is False
