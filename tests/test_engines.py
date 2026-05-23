@@ -117,6 +117,9 @@ class TestPollyEngine:
         assert sr == 16000
         assert audio.dtype == np.float32
         assert audio.max() <= 1.0 and audio.min() >= -1.0
+        np.testing.assert_allclose(
+            audio, [0.0, 16384 / 32768.0, -16384 / 32768.0, 32767 / 32768.0], rtol=1e-6
+        )
         kwargs = client.synthesize_speech.call_args.kwargs
         assert kwargs["TextType"] == "text"
         assert kwargs["OutputFormat"] == "pcm"
@@ -141,6 +144,20 @@ class TestPollyEngine:
         assert eng.supports_ssml is True
         eng.warm()    # no-op, must not raise
         eng.unload()  # no-op, must not raise
+
+    def test_uses_configured_profile_and_region(self, tmp_path):
+        from speeker.engines import PollyEngine
+        from speeker.config import save_config
+        boto3, client = _mock_boto3_returning(np.array([0], dtype=np.int16).tobytes())
+        with patch.dict(sys.modules, {"boto3": boto3}), \
+             patch.dict("os.environ", {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({"polly": {"profile": "personal", "region": "us-west-2"}})
+            eng = PollyEngine()
+            eng.generate("hi", "Joanna")
+        boto3.Session.assert_called_once_with(profile_name="personal")
+        boto3.Session.return_value.client.assert_called_once_with(
+            "polly", region_name="us-west-2"
+        )
 
     def test_registry_creates_polly(self):
         assert get_engine("polly").name == "polly"
