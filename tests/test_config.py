@@ -210,7 +210,10 @@ class TestGetLlmConfig:
 
 
 class TestPollyConfig:
+    """Tests for get_polly_config function."""
+
     def test_defaults(self, tmp_path):
+        """Test returns default Polly configuration."""
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             cfg = get_polly_config()
             assert cfg["region"] is None
@@ -219,6 +222,7 @@ class TestPollyConfig:
             assert cfg["voice"] == "Joanna"
 
     def test_merge_partial(self, tmp_path):
+        """Test partial config is merged with defaults."""
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             save_config({"polly": {"voice": "Matthew"}})
             cfg = get_polly_config()
@@ -227,8 +231,19 @@ class TestPollyConfig:
 
 
 class TestSsmlConfig:
+    """Tests for get_ssml_config function."""
+
     def test_defaults(self, tmp_path):
+        """Test returns default SSML configuration."""
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             cfg = get_ssml_config()
             assert cfg["emulate_for_local"] is False
             assert cfg["acronyms_file"] is None
+
+    def test_merge_partial(self, tmp_path):
+        """Test partial config is merged with defaults."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({"ssml": {"acronyms_file": "/tmp/acr.txt"}})
+            cfg = get_ssml_config()
+            assert cfg["acronyms_file"] == "/tmp/acr.txt"
+            assert cfg["emulate_for_local"] is False  # default preserved by merge

@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
         "voice": "Joanna",   # default Polly VoiceId
     },
     "ssml": {
-        "emulate_for_local": False,  # CLI --best-effort-ssml-emulation overrides
+        "emulate_for_local": False,  # if True, approximate SSML for local TTS engines
         "acronyms_file": None,       # path to a file of extra spell-out acronyms
     },
 }
