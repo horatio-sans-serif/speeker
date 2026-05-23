@@ -24,6 +24,22 @@ from speeker.player import (
 )
 
 
+class _PlayerRecordingEngine:
+    name = "rec"
+    supports_ssml = False
+
+    def __init__(self):
+        self.calls = []
+
+    def default_voice(self):
+        return "azelma"
+
+    def generate(self, text, voice, *, is_ssml=False, **options):
+        import numpy as np
+        self.calls.append({"text": text, "voice": voice, "is_ssml": is_ssml, **options})
+        return np.zeros(8, dtype=np.float32), 16000
+
+
 class TestParseNoteToken:
     """Tests for parse_note_token function."""
 
@@ -225,29 +241,18 @@ class TestConstants:
 class TestUnloadTtsModel:
     """Tests for unload_tts_model function."""
 
-    def test_unload_clears_globals(self):
-        """Test unload_tts_model clears model and voice states."""
-        import speeker.player as player
+    def test_unload_calls_unload_all(self):
+        """Test unload_tts_model delegates to unload_all."""
+        from speeker import player
 
-        player._tts_model = MagicMock()
-        player._voice_states = {"azelma": MagicMock()}
+        with patch.object(player, "unload_all") as mock_unload_all:
+            unload_tts_model()
+            mock_unload_all.assert_called_once()
 
-        unload_tts_model()
-
-        assert player._tts_model is None
-        assert player._voice_states == {}
-
-    def test_unload_when_already_none(self):
-        """Test unload_tts_model is safe when model is already None."""
-        import speeker.player as player
-
-        player._tts_model = None
-        player._voice_states = {}
-
-        unload_tts_model()
-
-        assert player._tts_model is None
-        assert player._voice_states == {}
+    def test_unload_is_safe_to_call(self):
+        """Test unload_tts_model can be called without error."""
+        with patch("speeker.player.unload_all"):
+            unload_tts_model()  # Should not raise
 
 
 class TestGetAudioPlayerLinux:
@@ -652,9 +657,9 @@ class TestProcessQueue:
 
         mock_sessions.return_value = ["session1"]
         mock_pending.return_value = [
-            {"id": 1, "text": "Hello", "created_at": "2024-01-01 12:00:00"}
+            {"id": 1, "text": "Hello", "created_at": "2024-01-01 12:00:00", "metadata": None}
         ]
-        mock_settings.return_value = {"voice": "azelma", "speed": 1.0, "intro_sound": False}
+        mock_settings.return_value = {"voice": "azelma", "speed": 1.0, "intro_sound": False, "engine": "pocket-tts"}
         mock_speak.return_value = Path("/tmp/test.wav")
 
         result = process_queue(verbose=False)
@@ -708,79 +713,44 @@ class TestMainFunction:
 
 
 class TestGenerateTTS:
-    """Tests for generate_tts function."""
+    """Tests for generate_tts function (dispatches through the engine registry)."""
 
-    @patch("speeker.player.get_voice_state")
-    @patch("speeker.player.get_tts_model")
-    def test_generate_tts_success(self, mock_model, mock_voice, tmp_path):
-        """Test generate_tts generates audio file."""
-        from speeker.player import generate_tts
-        import numpy as np
-
-        mock_model_instance = MagicMock()
-        mock_model_instance.generate_audio.return_value = MagicMock(
-            numpy=MagicMock(return_value=np.zeros(1000, dtype=np.float32))
-        )
-        mock_model_instance.sample_rate = 22050
-        mock_model.return_value = mock_model_instance
-        mock_voice.return_value = MagicMock()
-
-        path = generate_tts("Hello world", verbose=False)
-
+    def test_generate_tts_success(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            path = player.generate_tts("Hello world", verbose=False)
         assert path is not None
         assert path.exists()
         path.unlink()
 
-    @patch("speeker.player.get_voice_state")
-    @patch("speeker.player.get_tts_model")
-    def test_generate_tts_with_save_path(self, mock_model, mock_voice, tmp_path):
-        """Test generate_tts saves to specified path."""
-        from speeker.player import generate_tts
-        import numpy as np
-
-        mock_model_instance = MagicMock()
-        mock_model_instance.generate_audio.return_value = MagicMock(
-            numpy=MagicMock(return_value=np.zeros(1000, dtype=np.float32))
-        )
-        mock_model_instance.sample_rate = 22050
-        mock_model.return_value = mock_model_instance
-        mock_voice.return_value = MagicMock()
-
+    def test_generate_tts_with_save_path(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()
         save_path = tmp_path / "output.wav"
-        path = generate_tts("Hello world", save_path=save_path, verbose=False)
-
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            path = player.generate_tts("Hello world", save_path=save_path, verbose=False)
         assert path == save_path
         assert save_path.exists()
 
-    @patch("speeker.player.get_voice_state")
-    @patch("speeker.player.get_tts_model")
-    def test_generate_tts_with_speed(self, mock_model, mock_voice, tmp_path):
-        """Test generate_tts applies speed adjustment."""
-        from speeker.player import generate_tts
-        import numpy as np
-
-        mock_model_instance = MagicMock()
-        mock_model_instance.generate_audio.return_value = MagicMock(
-            numpy=MagicMock(return_value=np.zeros(1000, dtype=np.float32))
-        )
-        mock_model_instance.sample_rate = 22050
-        mock_model.return_value = mock_model_instance
-        mock_voice.return_value = MagicMock()
-
-        path = generate_tts("Hello world", speed=1.5, verbose=False)
-
+    def test_generate_tts_with_speed(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            path = player.generate_tts("Hello world", speed=1.5, verbose=False)
         assert path is not None
         path.unlink()
 
-    @patch("speeker.player.get_tts_model")
-    def test_generate_tts_error(self, mock_model):
-        """Test generate_tts returns None on error."""
-        from speeker.player import generate_tts
-
-        mock_model.side_effect = Exception("TTS error")
-
-        path = generate_tts("Hello world", verbose=False)
-
+    def test_generate_tts_error(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        rec.generate = MagicMock(side_effect=Exception("TTS error"))
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            path = player.generate_tts("Hello world", verbose=False)
         assert path is None
 
 
@@ -861,81 +831,78 @@ class TestRunDaemon:
 
     @patch("speeker.player.time.sleep")
     @patch("speeker.player.get_pending_count")
-    @patch("speeker.player.get_voice_state")
-    @patch("speeker.player.get_tts_model")
+    @patch("speeker.player.get_engine")
     @patch("speeker.player.release_lock")
     @patch("speeker.player.acquire_lock")
     @patch("speeker.config.get_player_config")
     def test_run_daemon_preloads_when_timeout_zero(
-        self, mock_config, mock_acquire, mock_release, mock_model, mock_voice, mock_pending, mock_sleep, tmp_path
+        self, mock_config, mock_acquire, mock_release, mock_get_engine,
+        mock_pending, mock_sleep, tmp_path
     ):
-        """Test run_daemon preloads model when model_idle_timeout_minutes is 0."""
         from speeker.player import run_daemon
-
         mock_config.return_value = {"model_idle_timeout_minutes": 0}
-        lock_path = tmp_path / "player.lock"
-        mock_acquire.return_value = lock_path
+        mock_acquire.return_value = tmp_path / "player.lock"
         mock_pending.return_value = 0
+        fake_engine = MagicMock()
+        mock_get_engine.return_value = fake_engine
 
         call_count = [0]
         def sleep_side_effect(duration):
             call_count[0] += 1
             if call_count[0] >= 2:
                 raise KeyboardInterrupt()
-
         mock_sleep.side_effect = sleep_side_effect
 
-        try:
-            run_daemon(verbose=False)
-        except KeyboardInterrupt:
-            pass
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            try:
+                run_daemon(verbose=False)
+            except KeyboardInterrupt:
+                pass
 
-        mock_model.assert_called_once()
-        mock_voice.assert_called_once_with("azelma")
+        fake_engine.warm.assert_called_once()
         mock_release.assert_called()
 
     @patch("speeker.player.time.sleep")
     @patch("speeker.player.get_pending_count")
-    @patch("speeker.player.get_tts_model")
+    @patch("speeker.player.get_engine")
     @patch("speeker.player.release_lock")
     @patch("speeker.player.acquire_lock")
     @patch("speeker.config.get_player_config")
     def test_run_daemon_skips_preload_with_timeout(
-        self, mock_config, mock_acquire, mock_release, mock_model, mock_pending, mock_sleep, tmp_path
+        self, mock_config, mock_acquire, mock_release, mock_get_engine,
+        mock_pending, mock_sleep, tmp_path
     ):
-        """Test run_daemon skips model preload when idle timeout is set."""
         from speeker.player import run_daemon
-
         mock_config.return_value = {"model_idle_timeout_minutes": 5}
-        lock_path = tmp_path / "player.lock"
-        mock_acquire.return_value = lock_path
+        mock_acquire.return_value = tmp_path / "player.lock"
         mock_pending.return_value = 0
+        fake_engine = MagicMock()
+        mock_get_engine.return_value = fake_engine
 
         call_count = [0]
         def sleep_side_effect(duration):
             call_count[0] += 1
             if call_count[0] >= 2:
                 raise KeyboardInterrupt()
-
         mock_sleep.side_effect = sleep_side_effect
 
-        try:
-            run_daemon(verbose=False)
-        except KeyboardInterrupt:
-            pass
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            try:
+                run_daemon(verbose=False)
+            except KeyboardInterrupt:
+                pass
 
-        mock_model.assert_not_called()
+        fake_engine.warm.assert_not_called()
 
     @patch("speeker.player.unload_tts_model")
     @patch("speeker.player.process_queue")
     @patch("speeker.player.time.sleep")
     @patch("speeker.player.get_pending_count")
-    @patch("speeker.player.get_tts_model")
     @patch("speeker.player.release_lock")
     @patch("speeker.player.acquire_lock")
     @patch("speeker.config.get_player_config")
     def test_run_daemon_unloads_model_after_idle(
-        self, mock_config, mock_acquire, mock_release, mock_model, mock_pending,
+        self, mock_config, mock_acquire, mock_release, mock_pending,
         mock_sleep, mock_process, mock_unload, tmp_path
     ):
         """Test daemon unloads model after idle timeout expires."""
@@ -1052,10 +1019,10 @@ class TestProcessQueueAdvanced:
 
         mock_sessions.return_value = ["session1"]
         mock_pending.return_value = [
-            {"id": 1, "text": "Hello", "created_at": "2024-01-01 12:00:00"},
-            {"id": 2, "text": "World", "created_at": "2024-01-01 12:01:00"},
+            {"id": 1, "text": "Hello", "created_at": "2024-01-01 12:00:00", "metadata": None},
+            {"id": 2, "text": "World", "created_at": "2024-01-01 12:01:00", "metadata": None},
         ]
-        mock_settings.return_value = {"voice": "azelma", "speed": 1.0, "intro_sound": True}
+        mock_settings.return_value = {"voice": "azelma", "speed": 1.0, "intro_sound": True, "engine": "pocket-tts"}
         mock_speak.return_value = Path("/tmp/test.wav")
 
         with patch("speeker.player.should_announce_intro") as mock_announce:
@@ -1080,3 +1047,52 @@ class TestProcessQueueAdvanced:
             result = process_queue(verbose=False)
 
             assert result == 0
+
+
+class TestGenerateTtsDispatch:
+    def test_dispatches_to_named_engine_plain(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            out = player.generate_tts(
+                "Hello.", voice="Joanna", engine="polly",
+                save_path=tmp_path / "a.wav",
+            )
+        assert out == tmp_path / "a.wav"
+        assert rec.calls[0]["is_ssml"] is False
+        assert rec.calls[0]["voice"] == "Joanna"
+
+    def test_ssml_local_engine_stripped(self, tmp_path):
+        from speeker import player
+        rec = _PlayerRecordingEngine()  # supports_ssml = False
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec):
+            player.generate_tts(
+                "<speak>Hi <break/>there</speak>", voice="azelma",
+                engine="pocket-tts", is_ssml=True, save_path=tmp_path / "b.wav",
+            )
+        assert rec.calls[0]["text"] == "Hi there"
+        assert rec.calls[0]["is_ssml"] is False
+
+
+class TestProcessQueueSsml:
+    def test_ssml_item_spoken_verbatim(self, tmp_path):
+        from speeker import player
+        from speeker.queue_db import enqueue
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            # Two items so build_session_script would prefix each ("First: ", "Last: ").
+            enqueue("plain message", metadata={"queue": "q1"})
+            enqueue("<speak>Hi there</speak>", metadata={"queue": "q1", "ssml": True})
+
+            captured = []
+
+            def fake_speak(line, **kw):
+                captured.append((line, kw))
+                return kw.get("save_path")
+
+            with patch.object(player, "speak_text", side_effect=fake_speak):
+                player.process_queue(verbose=False)
+
+        ssml_lines = [line for line, kw in captured if kw.get("is_ssml")]
+        assert ssml_lines == ["<speak>Hi there</speak>"]

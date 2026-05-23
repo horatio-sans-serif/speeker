@@ -13,11 +13,9 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    from pocket_tts import TTSModel
-
+from .engines import get_engine, prepare_payload, unload_all
+from .ssml import looks_like_ssml
 from .paths import (
     audio_dir as _audio_dir,
     cache_dir as _cache_dir,
@@ -48,10 +46,6 @@ POLL_INTERVAL = 0.5  # Check queue every 500ms
 
 # How long before we re-announce "This is Claude Code"
 ANNOUNCE_THRESHOLD_MINUTES = 30
-
-# Lazy-loaded TTS model (expensive to initialize, kept warm)
-_tts_model: "TTSModel | None" = None
-_voice_states: dict[str, object] = {}
 
 # Cached sound files
 _intro_sound_path: Path | None = None
@@ -118,30 +112,8 @@ AUDIO_PLAYER = get_audio_player()
 
 
 def unload_tts_model() -> None:
-    """Unload the TTS model to free memory."""
-    global _tts_model, _voice_states
-    _tts_model = None
-    _voice_states = {}
-
-
-def get_tts_model() -> "TTSModel":
-    """Get the TTS model, loading it if needed (kept warm for fast responses)."""
-    global _tts_model
-    if _tts_model is None:
-        from pocket_tts import TTSModel
-        _tts_model = TTSModel.load_model()
-    return _tts_model
-
-
-def get_voice_state(voice: str) -> object:
-    """Get or create voice state for the given voice."""
-    global _voice_states
-    if voice not in _voice_states:
-        from .voices import get_pocket_tts_voice_path
-        model = get_tts_model()
-        voice_path = get_pocket_tts_voice_path(voice)
-        _voice_states[voice] = model.get_state_for_audio_prompt(voice_path)
-    return _voice_states[voice]
+    """Unload all cached TTS engines to free memory."""
+    unload_all()
 
 
 def generate_tone(frequencies: list[int], rising: bool = True) -> Path:
@@ -258,57 +230,54 @@ def generate_tts(
     speed: float = 1.0,
     save_path: Path | None = None,
     verbose: bool = False,
+    *,
+    engine: str | None = None,
+    is_ssml: bool = False,
+    polly_engine: str | None = None,
 ) -> Path | None:
-    """Generate TTS audio for text.
-
-    Args:
-        text: Text to speak
-        voice: Voice to use (default: azelma)
-        speed: Playback speed multiplier (default: 1.0)
-        save_path: If provided, save to this path instead of temp file
-        verbose: Print debug info
-
-    Returns:
-        Path to audio file, or None on failure
-    """
+    """Generate TTS audio for text using the named engine."""
     try:
         import numpy as np
         from scipy.io import wavfile
-        from .voices import get_default_voice
         from .preprocessing import preprocess_for_tts
+        from .config import get_ssml_config
 
         if verbose:
             print(f"[TTS] {text[:60]}{'...' if len(text) > 60 else ''}", file=sys.stderr)
 
-        # Preprocess text
-        processed = preprocess_for_tts(text)
+        eng = get_engine(engine)
+        voice = voice or eng.default_voice()
+        is_ssml = is_ssml or looks_like_ssml(text)
 
-        # Generate audio (model is kept warm)
-        model = get_tts_model()
-        voice = voice or get_default_voice("pocket-tts")
-        voice_state = get_voice_state(voice)
-        audio = model.generate_audio(voice_state, processed)
+        if is_ssml:
+            ssml_cfg = get_ssml_config()
+            payload, ssml_for_engine = prepare_payload(
+                eng, text, is_ssml=True,
+                emulate=ssml_cfg.get("emulate_for_local", False),
+                acronyms_file=ssml_cfg.get("acronyms_file"),
+            )
+        else:
+            payload, ssml_for_engine = preprocess_for_tts(text), False
 
-        # Apply speed adjustment by resampling
-        audio_np = audio.numpy()
+        audio_np, sample_rate = eng.generate(
+            payload, voice, is_ssml=ssml_for_engine, polly_engine=polly_engine
+        )
+
         if speed != 1.0 and speed > 0:
             from scipy import signal
-            # Resample to change speed (higher speed = fewer samples)
             new_length = int(len(audio_np) / speed)
             audio_np = signal.resample(audio_np, new_length)
 
-        # Normalize and convert to int16
         audio_normalized = np.clip(audio_np, -1.0, 1.0)
         audio_int16 = (audio_normalized * 32767).astype(np.int16)
 
-        # Save to file
         if save_path:
             save_path.parent.mkdir(parents=True, exist_ok=True)
-            wavfile.write(str(save_path), model.sample_rate, audio_int16)
+            wavfile.write(str(save_path), sample_rate, audio_int16)
             return save_path
         else:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                wavfile.write(f.name, model.sample_rate, audio_int16)
+                wavfile.write(f.name, sample_rate, audio_int16)
                 return Path(f.name)
 
     except Exception as e:
@@ -367,33 +336,30 @@ def speak_text(
     speed: float = 1.0,
     save_path: Path | None = None,
     verbose: bool = False,
+    *,
+    engine: str | None = None,
+    is_ssml: bool = False,
+    polly_engine: str | None = None,
 ) -> Path | None:
-    """Generate and play TTS for text.
-
-    Handles tone tokens like $Eb3 at the start of text - plays them as
-    musical tones before speaking the remaining text.
-
-    Returns path to saved audio file if save_path provided, else None.
-    """
-    # Extract and play any leading tone tokens
+    """Generate and play TTS for text. Handles leading $Note tone tokens."""
     tone_tokens, clean_text = extract_tone_tokens(text)
     if tone_tokens:
         play_tone_tokens(tone_tokens, verbose)
-        # No pause - start speaking immediately after tone
 
-    # If only tones, nothing to speak
     if not clean_text:
         return save_path
 
-    audio_path = generate_tts(clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
+    audio_path = generate_tts(
+        clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose,
+        engine=engine, is_ssml=is_ssml, polly_engine=polly_engine,
+    )
     if audio_path is None:
         return None
 
     try:
         play_audio(audio_path, verbose)
-        return save_path  # Return saved path if we saved it
+        return save_path
     finally:
-        # Clean up temp files (not saved files)
         if save_path is None and audio_path:
             try:
                 audio_path.unlink()
@@ -492,7 +458,7 @@ def process_queue(verbose: bool = False) -> int:
             print("[INFO] Playing intro sound", file=sys.stderr)
         play_audio(get_intro_sound(), verbose)
         time.sleep(0.2)
-        speak_text("This is Claude Code.", verbose=verbose)
+        speak_text("This is Claude Code.", verbose=verbose, engine=global_settings["engine"])
         time.sleep(PAUSE_BETWEEN_SESSIONS)
 
     # Process each session
@@ -516,18 +482,32 @@ def process_queue(verbose: bool = False) -> int:
             if line_idx > 0:
                 time.sleep(PAUSE_BETWEEN_MESSAGES)
 
-            # Determine which item this line corresponds to (for saving audio)
-            # Script: [header], [msg1], [msg2], ...
             item_idx = line_idx - 1 if not (len(items) == 1 and is_only_session) else line_idx
             save_path = None
+            line_engine = settings["engine"]
+            line_voice = settings["voice"]
+            line_polly_engine = None
+            line_is_ssml = False
             if 0 <= item_idx < len(items):
-                save_path = get_audio_save_path(items[item_idx]["id"])
+                item = items[item_idx]
+                save_path = get_audio_save_path(item["id"])
+                meta = item.get("metadata") or {}
+                line_engine = meta.get("engine") or settings["engine"]
+                line_voice = meta.get("voice") or settings["voice"]
+                line_polly_engine = meta.get("polly_engine")
+                line_is_ssml = bool(meta.get("ssml")) or looks_like_ssml(item["text"])
+                if line_is_ssml:
+                    # SSML must be spoken verbatim: a spoken prefix like "First: "
+                    # would sit outside the <speak> root and corrupt the markup.
+                    line = item["text"]
 
-            result = speak_text(line, voice=voice, speed=speed, save_path=save_path, verbose=verbose)
+            result = speak_text(
+                line, voice=line_voice, speed=speed, save_path=save_path, verbose=verbose,
+                engine=line_engine, is_ssml=line_is_ssml, polly_engine=line_polly_engine,
+            )
 
             if result is not None or save_path is None:
                 total_played += 1
-                # Update audio path in database
                 if save_path and 0 <= item_idx < len(items):
                     update_audio_path(items[item_idx]["id"], save_path)
 
@@ -538,7 +518,7 @@ def process_queue(verbose: bool = False) -> int:
     # Outro (skip if single message)
     if total_played > 0 and not is_single_message and global_settings["intro_sound"]:
         time.sleep(PAUSE_BETWEEN_SESSIONS)
-        speak_text("That is all.", verbose=verbose)
+        speak_text("That is all.", verbose=verbose, engine=global_settings["engine"])
         time.sleep(0.2)
         play_audio(get_outro_sound(), verbose)
 
@@ -592,14 +572,14 @@ def run_daemon(verbose: bool = False) -> None:
 
     idle_timeout = get_player_config().get("model_idle_timeout_minutes", 0)
 
-    # Pre-warm the TTS model unless configured to lazy-load
+    # Pre-warm the active engine unless configured to lazy-load
     if idle_timeout == 0:
+        default_engine = get_settings()["engine"]
         if verbose:
-            print("[INFO] Warming up TTS model...", file=sys.stderr)
-        get_tts_model()
-        get_voice_state("azelma")  # Default voice
+            print(f"[INFO] Warming up {default_engine} engine...", file=sys.stderr)
+        get_engine(default_engine).warm()
         if verbose:
-            print("[INFO] TTS model ready!", file=sys.stderr)
+            print("[INFO] TTS engine ready!", file=sys.stderr)
     elif verbose:
         print(f"[INFO] Model idle timeout: {idle_timeout} min (lazy-load)", file=sys.stderr)
 

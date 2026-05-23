@@ -202,14 +202,23 @@ def get_pending_for_session(session_id: str) -> list[dict]:
     with get_connection() as conn:
         cursor = conn.execute(
             """
-            SELECT id, session_id, text, audio_path, created_at
+            SELECT id, session_id, text, audio_path, created_at, metadata
             FROM queue
             WHERE session_id = ? AND played_at IS NULL
             ORDER BY created_at ASC
             """,
             (session_id,),
         )
-        return [dict(row) for row in cursor.fetchall()]
+        items = []
+        for row in cursor.fetchall():
+            item = dict(row)
+            if item.get("metadata"):
+                try:
+                    item["metadata"] = json.loads(item["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    item["metadata"] = None
+            items.append(item)
+        return items
 
 
 def mark_played(item_id: int) -> None:

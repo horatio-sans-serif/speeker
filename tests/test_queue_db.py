@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for queue_db functions."""
 
+import os
 import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -650,3 +651,13 @@ class TestSemanticSearchEnabled:
         enqueue("Test message")
         result = search("test")
         assert len(result) >= 1
+
+
+class TestPendingMetadata:
+    def test_get_pending_returns_parsed_metadata(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker.queue_db import enqueue, get_pending_for_session
+            enqueue("hi", metadata={"queue": "q1", "ssml": True, "engine": "polly"})
+            items = get_pending_for_session("q1")
+            assert items[0]["metadata"]["ssml"] is True
+            assert items[0]["metadata"]["engine"] == "polly"
