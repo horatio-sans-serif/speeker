@@ -22,6 +22,9 @@ semantic = [
 clone = [
     "yt-dlp>=2024.0.0",
 ]
+polly = [
+    "boto3>=1.34",
+]
 
 [project.scripts]
 speeker = "speeker.cli:main"
