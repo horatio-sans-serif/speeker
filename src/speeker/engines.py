@@ -30,7 +30,11 @@ class BaseEngine:
     def generate(
         self, text: str, voice: str, *, is_ssml: bool = False, **options
     ) -> tuple[np.ndarray, int]:
-        """Return (float32 audio in [-1, 1], sample_rate)."""
+        """Return (audio samples as a numpy array, sample_rate).
+
+        Samples are nominally floating-point near [-1, 1]; callers must clip to
+        [-1, 1] and cast to int16 before WAV output.
+        """
         raise NotImplementedError
 
     def warm(self) -> None:
