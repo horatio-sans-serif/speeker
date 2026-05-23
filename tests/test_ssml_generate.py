@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Unit tests for ssml_generate.py."""
 
+from unittest.mock import patch
+
+from speeker import ssml_generate
 from speeker.ssml_generate import (
     rule_based_ssml,
     PURPOSE_PRESETS,
     PURPOSE_ALIASES,
+    generate_ssml,
 )
 
 
@@ -53,10 +57,6 @@ class TestRuleBasedSsml:
         out = rule_based_ssml("Tom & Jerry", "audiobook")
         assert "Tom &amp; Jerry" in out
 
-
-from unittest.mock import patch
-from speeker import ssml_generate
-from speeker.ssml_generate import generate_ssml
 
 
 class TestGenerateSsml:

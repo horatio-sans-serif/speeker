@@ -8,6 +8,8 @@ from speeker.ssml import (
     sanitize_ssml,
     escape_text,
     POLLY_SAFE_TAGS,
+    emulate_ssml,
+    load_acronyms,
 )
 
 
@@ -84,8 +86,6 @@ class TestSanitizeSsml:
         assert "prosody" in POLLY_SAFE_TAGS
         assert "say-as" in POLLY_SAFE_TAGS
 
-
-from speeker.ssml import emulate_ssml, load_acronyms, COMMON_ACRONYMS
 
 
 class TestLoadAcronyms:

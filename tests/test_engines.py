@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Unit tests for engines.py (registry + payload prep). No real models run."""
 
+import io
+import sys
+from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 
@@ -85,10 +89,6 @@ class TestPreparePayload:
         )
         assert payload == "P-H-I" and is_ssml is False
 
-
-import io
-import sys
-from unittest.mock import MagicMock, patch
 
 
 def _mock_boto3_returning(pcm_bytes: bytes):

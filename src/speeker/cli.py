@@ -20,7 +20,6 @@ from .preprocessing import preprocess_for_tts
 from .voices import (
     DEFAULT_ENGINE,
     get_default_voice,
-    get_pocket_tts_voice_path,
     get_voices,
     validate_voice,
     POLLY_VARIANT_DEFAULT_VOICE,
