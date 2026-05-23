@@ -83,3 +83,50 @@ class TestSanitizeSsml:
     def test_polly_safe_tags_present(self):
         assert "prosody" in POLLY_SAFE_TAGS
         assert "say-as" in POLLY_SAFE_TAGS
+
+
+from speeker.ssml import emulate_ssml, load_acronyms, COMMON_ACRONYMS
+
+
+class TestLoadAcronyms:
+    def test_builtin_present(self):
+        acr = load_acronyms()
+        assert "PHI" in acr
+
+    def test_file_all_separators(self, tmp_path):
+        f = tmp_path / "acr.txt"
+        f.write_text("EHR,EMR|HL7;FHIR ICD")
+        acr = load_acronyms(str(f))
+        for token in ("EHR", "EMR", "HL7", "FHIR", "ICD"):
+            assert token in acr
+
+    def test_missing_file_returns_builtin(self, tmp_path):
+        acr = load_acronyms(str(tmp_path / "nope.txt"))
+        assert "PHI" in acr
+
+
+class TestEmulateSsml:
+    def test_say_as_characters_spells_out(self):
+        out = emulate_ssml('<say-as interpret-as="characters">PHI</say-as>')
+        assert out == "P-H-I"
+
+    def test_sub_uses_alias(self):
+        out = emulate_ssml('<sub alias="World Wide Web">WWW</sub>')
+        assert out == "World Wide Web"
+
+    def test_break_becomes_punctuation(self):
+        out = emulate_ssml('Hello<break time="500ms"/>world')
+        assert "Hello." in out and "world" in out
+
+    def test_known_acronym_spelled(self):
+        out = emulate_ssml("Patient PHI today")
+        assert "P-H-I" in out
+
+    def test_unknown_caps_normalized(self):
+        out = emulate_ssml("Please STOP now")
+        assert "STOP" not in out
+        assert "Stop" in out
+
+    def test_other_tags_dropped_text_kept(self):
+        out = emulate_ssml("<emphasis>really</emphasis> good")
+        assert out == "really good"
