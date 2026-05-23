@@ -17,9 +17,11 @@ from .web import router as web_router
 from .voices import (
     POCKET_TTS_VOICES,
     KOKORO_VOICES,
+    POLLY_VOICES,
     DEFAULT_ENGINE,
     DEFAULT_POCKET_TTS_VOICE,
     DEFAULT_KOKORO_VOICE,
+    DEFAULT_POLLY_VOICE,
 )
 
 
@@ -65,6 +67,7 @@ def elide_message_count(text: str) -> str:
 class SpeakRequest(BaseModel):
     text: str
     metadata: dict | None = None
+    ssml: bool = False
     session_id: str | None = None  # Deprecated
 
 
@@ -154,6 +157,11 @@ async def speak(body: SpeakRequest, request: Request):
         title = extract_title(request)
         text = elide_message_count(text)
         text = format_with_title(text, title)
+
+        # Persist ssml flag from body or query param
+        ssml = body.ssml or request.query_params.get("ssml", "").lower() == "true"
+        if ssml:
+            metadata["ssml"] = True
 
         # Queue the text for playback
         queue_id = enqueue(text, metadata=metadata if metadata else None)
@@ -272,6 +280,8 @@ async def get_voices(engine: str | None = None):
         engines["pocket-tts"] = format_voices(POCKET_TTS_VOICES, DEFAULT_POCKET_TTS_VOICE)
     if engine is None or engine == "kokoro":
         engines["kokoro"] = format_voices(KOKORO_VOICES, DEFAULT_KOKORO_VOICE)
+    if engine is None or engine == "polly":
+        engines["polly"] = format_voices(POLLY_VOICES, DEFAULT_POLLY_VOICE)
 
     # Include custom cloned voices
     if engine is None or engine == "custom":
@@ -288,7 +298,7 @@ async def get_voices(engine: str | None = None):
                 },
             }
 
-    known_engines = {"pocket-tts", "kokoro", "custom"}
+    known_engines = {"pocket-tts", "kokoro", "polly", "custom"}
     if engine and engine not in known_engines:
         return {"status": "error", "error": f"Unknown engine: {engine}"}
 

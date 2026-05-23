@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for server.py utility functions and HTTP endpoints."""
 
+import os
 from unittest.mock import Mock, patch
 
 import pytest
@@ -549,3 +550,35 @@ class TestSummarizeEndpoint:
         data = response.json()
         assert data["status"] == "error"
         assert "LLM error" in data["error"]
+
+
+class TestSsmlAndPolly:
+    def test_speak_ssml_body_flag_stored_in_metadata(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            from speeker.queue_db import get_history
+            c = TestClient(app)
+            r = c.post("/speak", json={"text": "<speak>hi</speak>", "ssml": True})
+            assert r.json()["status"] == "success"
+            hist = get_history(limit=1)
+            assert hist[0]["metadata"]["ssml"] is True
+
+    def test_speak_ssml_query_flag(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            from speeker.queue_db import get_history
+            c = TestClient(app)
+            r = c.post("/speak?ssml=true", json={"text": "<speak>hi</speak>"})
+            assert r.json()["status"] == "success"
+            assert get_history(limit=1)[0]["metadata"]["ssml"] is True
+
+    def test_voices_includes_polly(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            c = TestClient(app)
+            data = c.get("/voices").json()
+            assert "polly" in data["engines"]
+            assert "Joanna" in data["engines"]["polly"]["voices"]
