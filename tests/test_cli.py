@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for cli.py utility functions."""
 
+import argparse
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -866,9 +867,6 @@ class TestStartPlayerFallback:
             mock_exists.return_value = True
             start_player()
             mock_popen.assert_called_once()
-
-
-import argparse
 
 
 class _RecordingEngine:

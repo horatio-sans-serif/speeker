@@ -37,6 +37,8 @@ from .engines import get_engine, prepare_payload
 from .ssml import looks_like_ssml
 from .config import get_ssml_config
 
+KNOWN_ENGINES = ("pocket-tts", "kokoro", "polly")
+
 
 def get_queue_file() -> Path:
     """Get the path to the queue file."""
@@ -222,15 +224,14 @@ def speak_text(
     if not text or not text.strip():
         return True  # Empty text is not an error
 
-    if emulate is None:
-        emulate = get_ssml_config().get("emulate_for_local", False)
-    acronyms_file = get_ssml_config().get("acronyms_file")
-
-    is_ssml = is_ssml or looks_like_ssml(text)
+    ssml_requested = is_ssml or looks_like_ssml(text)
 
     try:
         eng = get_engine(engine)
-        if is_ssml:
+        if ssml_requested:
+            if emulate is None:
+                emulate = get_ssml_config().get("emulate_for_local", False)
+            acronyms_file = get_ssml_config().get("acronyms_file")
             payload, ssml_for_engine = prepare_payload(
                 eng, text, is_ssml=True, emulate=emulate, acronyms_file=acronyms_file
             )
@@ -262,7 +263,7 @@ def speak_text(
 
 def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
     """Resolve the voice to use, honoring --polly-voice and per-variant defaults."""
-    if getattr(args, "polly_voice", None):
+    if engine == "polly" and getattr(args, "polly_voice", None):
         return args.polly_voice
     if args.voice:
         return args.voice
@@ -271,6 +272,19 @@ def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
         if variant:
             return POLLY_VARIANT_DEFAULT_VOICE.get(variant, get_default_voice(engine))
     return get_default_voice(engine)
+
+
+def _validate_engine_and_voice(engine: str, voice: str) -> bool:
+    """Print an error to stderr and return False if engine/voice is invalid."""
+    if engine not in KNOWN_ENGINES:
+        print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
+        return False
+    if not validate_voice(engine, voice):
+        available = list(get_voices(engine).get(engine, {}).keys())
+        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
+        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+        return False
+    return True
 
 
 def _apply_aws_profile(args: argparse.Namespace) -> None:
@@ -332,14 +346,7 @@ def cmd_speak_stream(args: argparse.Namespace) -> int:
     voice = _resolve_voice(args, engine)
     _apply_aws_profile(args)
 
-    if engine not in ("pocket-tts", "kokoro", "polly"):
-        print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
-        return 1
-
-    if not validate_voice(engine, voice):
-        available = list(get_voices(engine).get(engine, {}).keys())
-        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
-        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+    if not _validate_engine_and_voice(engine, voice):
         return 1
 
     if not args.quiet:
@@ -381,14 +388,7 @@ def cmd_speak(args: argparse.Namespace) -> int:
     voice = _resolve_voice(args, engine)
     _apply_aws_profile(args)
 
-    if engine not in ("pocket-tts", "kokoro", "polly"):
-        print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
-        return 1
-
-    if not validate_voice(engine, voice):
-        available = list(get_voices(engine).get(engine, {}).keys())
-        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
-        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+    if not _validate_engine_and_voice(engine, voice):
         return 1
 
     if not args.quiet:
@@ -561,7 +561,7 @@ def build_parser() -> argparse.ArgumentParser:
         "text", nargs="?", help="Text to speak (reads from stdin if not provided)"
     )
     speak_parser.add_argument(
-        "-e", "--engine", choices=["pocket-tts", "kokoro", "polly"], help="TTS engine"
+        "-e", "--engine", choices=list(KNOWN_ENGINES), help="TTS engine"
     )
     speak_parser.add_argument("-v", "--voice", help="Voice to use")
     speak_parser.add_argument(
@@ -605,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     # voices command
     voices_parser = subparsers.add_parser("voices", help="List available voices")
     voices_parser.add_argument(
-        "-e", "--engine", choices=["pocket-tts", "kokoro", "polly"], help="Filter by engine"
+        "-e", "--engine", choices=list(KNOWN_ENGINES), help="Filter by engine"
     )
     voices_parser.set_defaults(func=cmd_voices)
 
