@@ -2,6 +2,7 @@
 """Unit tests for cli.py utility functions."""
 
 import argparse
+import io
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -950,3 +951,29 @@ class TestCliSsmlAndEngine:
              patch.object(cli, "get_engine", return_value=rec):
             cli.cmd_speak(args)
             assert os.environ["AWS_PROFILE"] == "personal"
+
+
+class TestCliSsmlCommand:
+    def test_generates_to_stdout(self, tmp_path, capsys):
+        from speeker import cli
+        args = argparse.Namespace(purpose="plain")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch("sys.stdin", io.StringIO("Hello world.")):
+            rc = cli.cmd_ssml(args)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert out.strip().startswith("<speak>")
+
+    def test_empty_stdin_errors(self, tmp_path, capsys):
+        from speeker import cli
+        args = argparse.Namespace(purpose="audiobook")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch("sys.stdin", io.StringIO("   ")):
+            rc = cli.cmd_ssml(args)
+        assert rc == 1
+
+    def test_parser_has_ssml_command(self):
+        from speeker.cli import build_parser
+        args = build_parser().parse_args(["ssml", "--purpose", "audiobook"])
+        assert args.purpose == "audiobook"
+        assert args.func.__name__ == "cmd_ssml"

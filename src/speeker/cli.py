@@ -500,6 +500,22 @@ def cmd_bundle_prefs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ssml(args: argparse.Namespace) -> int:
+    """Read text on stdin, write purpose-tuned SSML to stdout."""
+    from .ssml_generate import generate_ssml
+
+    text = sys.stdin.read()
+    if not text or not text.strip():
+        print("Error: No input text on stdin", file=sys.stderr)
+        return 1
+    try:
+        print(generate_ssml(text, purpose=args.purpose))
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_voice_clone(args: argparse.Namespace) -> int:
     """Handle the voice-clone command."""
     from .voice_clone import clone_voice, get_custom_voices, delete_custom_voice
@@ -669,6 +685,28 @@ def build_parser() -> argparse.ArgumentParser:
         "--delete", metavar="NAME", help="Delete a custom voice"
     )
     voice_clone_parser.set_defaults(func=cmd_voice_clone)
+
+    # ssml command
+    from .ssml_generate import PURPOSE_PRESETS, PURPOSE_ALIASES
+    purpose_lines = "\n".join(
+        f"  {name:<14} {preset['description']}"
+        for name, preset in PURPOSE_PRESETS.items()
+    )
+    alias_lines = "\n".join(f"  {a:<14} alias for '{t}'" for a, t in PURPOSE_ALIASES.items())
+    ssml_parser = subparsers.add_parser(
+        "ssml",
+        help="Generate SSML from stdin text",
+        description="Read plain text on stdin and write purpose-tuned SSML to stdout.",
+        epilog="Purposes:\n" + purpose_lines + "\n" + alias_lines,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ssml_parser.add_argument(
+        "--purpose",
+        choices=list(PURPOSE_PRESETS) + list(PURPOSE_ALIASES),
+        default="audiobook",
+        help="Delivery style (default: audiobook)",
+    )
+    ssml_parser.set_defaults(func=cmd_ssml)
 
     return parser
 
