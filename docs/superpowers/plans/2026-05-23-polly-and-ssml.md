@@ -1219,13 +1219,29 @@ class TestCliSsmlAndEngine:
         parser = build_parser()
         args = parser.parse_args(
             ["speak", "hi", "-e", "polly", "--polly-engine", "neural",
-             "--polly-voice", "Matthew", "--ssml", "--best-effort-ssml-emulation"]
+             "--polly-voice", "Matthew", "--ssml", "--best-effort-ssml-emulation",
+             "--aws-profile", "personal"]
         )
         assert args.engine == "polly"
         assert args.polly_engine == "neural"
         assert args.polly_voice == "Matthew"
         assert args.ssml is True
         assert args.emulate_ssml is True
+        assert args.aws_profile == "personal"
+
+    def test_aws_profile_sets_env(self, tmp_path):
+        from speeker import cli
+        rec = _RecordingEngine()
+        rec.supports_ssml = True
+        args = argparse.Namespace(
+            text="hi", engine="polly", voice=None, polly_voice="Joanna",
+            polly_engine="neural", ssml=False, emulate_ssml=False,
+            aws_profile="personal", no_play=True, quiet=True, stdout=False, stream=False,
+        )
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(cli, "get_engine", return_value=rec):
+            cli.cmd_speak(args)
+        assert os.environ["AWS_PROFILE"] == "personal"
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -1239,7 +1255,11 @@ In `src/speeker/cli.py`:
 
 (a) Remove the model globals and the `TYPE_CHECKING` block importing `KPipeline`/`TTSModel`. Delete these definitions: `_pocket_tts_model`, `_pocket_tts_voice_states`, `_kokoro_pipeline`.
 
-Add these imports near the top (after existing imports):
+Add these imports near the top (add `import os` to the stdlib imports if absent; `cli.py` does not currently import it):
+
+```python
+import os
+```
 
 ```python
 from .engines import get_engine, prepare_payload
@@ -1349,11 +1369,21 @@ def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
     return get_default_voice(engine)
 ```
 
+Also add a small helper near `_resolve_voice` that applies the AWS profile override (boto3 reads `AWS_PROFILE` natively, so setting it before generation is the idiomatic way to select a profile without touching `PollyEngine`):
+
+```python
+def _apply_aws_profile(args: argparse.Namespace) -> None:
+    """Set AWS_PROFILE from --aws-profile so boto3 (Polly) picks it up."""
+    if getattr(args, "aws_profile", None):
+        os.environ["AWS_PROFILE"] = args.aws_profile
+```
+
 (d) In `cmd_speak`, replace the engine/voice resolution and validation block and the final `speak_text` call:
 
 ```python
     engine = args.engine or DEFAULT_ENGINE
     voice = _resolve_voice(args, engine)
+    _apply_aws_profile(args)
 
     if engine not in ("pocket-tts", "kokoro", "polly"):
         print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
@@ -1382,6 +1412,7 @@ def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
 ```python
     engine = args.engine or DEFAULT_ENGINE
     voice = _resolve_voice(args, engine)
+    _apply_aws_profile(args)
 
     if engine not in ("pocket-tts", "kokoro", "polly"):
         print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
@@ -1448,6 +1479,11 @@ def main() -> int:
         "--best-effort-ssml-emulation", dest="emulate_ssml", action="store_true",
         help="Approximate SSML on local engines (spell acronyms, pauses as "
              "punctuation, normalize ALL-CAPS). No effect on Polly.",
+    )
+    speak_parser.add_argument(
+        "--aws-profile",
+        help="AWS profile for Polly (sets AWS_PROFILE; overrides the default "
+             "credential chain). Equivalent to exporting AWS_PROFILE.",
     )
 ```
 
@@ -2874,11 +2910,18 @@ environment, or instance role). Configure region/profile/voice in `config.json`:
 }
 \`\`\`
 
+Selecting a profile (in order of precedence):
+
+- `speeker speak --aws-profile NAME ...` (CLI; sets `AWS_PROFILE` for that run)
+- `polly.profile` in `config.json`
+- the `AWS_PROFILE` environment variable (use this for the server/daemon, e.g.
+  `AWS_PROFILE=personal speeker-server`); `AWS_DEFAULT_REGION` selects the region
+
 Engine variants (`--polly-engine`): `standard` (cheapest), `neural` (natural,
 widest voice selection), `long-form` (narration), `generative` (most human).
 
 \`\`\`bash
-speeker speak -e polly --polly-engine neural --polly-voice Matthew "Hello there."
+speeker speak -e polly --polly-engine neural --polly-voice Matthew --aws-profile personal "Hello there."
 speeker speak -e polly --polly-engine long-form --polly-voice Danielle < chapter.txt
 \`\`\`
 ```
