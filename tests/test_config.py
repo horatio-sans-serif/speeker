@@ -13,6 +13,8 @@ from speeker.config import (
     get_embedding_model,
     get_embedding_cache_dir,
     get_llm_config,
+    get_polly_config,
+    get_ssml_config,
 )
 
 
@@ -205,3 +207,28 @@ class TestGetLlmConfig:
             assert result["endpoint"] is None
             assert result["api_key"] is None
             assert result["model"] is None
+
+
+class TestPollyConfig:
+    def test_defaults(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            cfg = get_polly_config()
+            assert cfg["region"] is None
+            assert cfg["profile"] is None
+            assert cfg["engine"] == "neural"
+            assert cfg["voice"] == "Joanna"
+
+    def test_merge_partial(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({"polly": {"voice": "Matthew"}})
+            cfg = get_polly_config()
+            assert cfg["voice"] == "Matthew"
+            assert cfg["engine"] == "neural"  # default preserved by merge
+
+
+class TestSsmlConfig:
+    def test_defaults(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            cfg = get_ssml_config()
+            assert cfg["emulate_for_local"] is False
+            assert cfg["acronyms_file"] is None
