@@ -582,3 +582,32 @@ class TestSsmlAndPolly:
             data = c.get("/voices").json()
             assert "polly" in data["engines"]
             assert "Joanna" in data["engines"]["polly"]["voices"]
+
+
+class TestSsmlEndpoint:
+    def test_generate_ssml(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            c = TestClient(app)
+            r = c.post("/ssml", json={"text": "Hello world.", "purpose": "plain"})
+            data = r.json()
+            assert data["status"] == "success"
+            assert data["ssml"].startswith("<speak>")
+            assert data["purpose"] == "plain"
+
+    def test_unknown_purpose_errors(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            c = TestClient(app)
+            r = c.post("/ssml", json={"text": "hi", "purpose": "bogus"})
+            assert r.json()["status"] == "error"
+
+    def test_empty_text_400(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from fastapi.testclient import TestClient
+            from speeker.server import app
+            c = TestClient(app)
+            r = c.post("/ssml", json={"text": "  "})
+            assert r.status_code == 400

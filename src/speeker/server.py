@@ -95,6 +95,18 @@ class SummarizeResponse(BaseModel):
     error: str | None = None
 
 
+class SsmlRequest(BaseModel):
+    text: str
+    purpose: str = "audiobook"
+
+
+class SsmlResponse(BaseModel):
+    status: str
+    ssml: str | None = None
+    purpose: str | None = None
+    error: str | None = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup checks."""
@@ -239,6 +251,20 @@ async def summarize_and_speak(body: SummarizeRequest, request: Request):
             summary=None,
             error=str(e),
         )
+
+
+@app.post("/ssml", response_model=SsmlResponse)
+async def make_ssml(body: SsmlRequest):
+    """Generate purpose-tuned SSML from plain text. Pure transform; no enqueue."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    try:
+        from .ssml_generate import generate_ssml
+        ssml = generate_ssml(text, purpose=body.purpose)
+        return SsmlResponse(status="success", ssml=ssml, purpose=body.purpose)
+    except ValueError as e:
+        return SsmlResponse(status="error", error=str(e))
 
 
 @app.get("/health")
