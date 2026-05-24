@@ -5,27 +5,18 @@ These tests require the actual TTS models to be available.
 They will be skipped if models cannot be loaded.
 """
 
+import importlib.util
 import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 import pytest
 import numpy as np
 
 # Check if TTS models are available
 def _check_pocket_tts():
-    try:
-        from pocket_tts import TTSModel
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("pocket_tts") is not None
 
 def _check_kokoro():
-    try:
-        from kokoro import KPipeline
-        return True
-    except ImportError:
-        return False
+    return importlib.util.find_spec("kokoro") is not None
 
 HAS_POCKET_TTS = _check_pocket_tts()
 HAS_KOKORO = _check_kokoro()

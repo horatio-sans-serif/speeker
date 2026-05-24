@@ -2,10 +2,9 @@
 """Unit tests for migrate.py - auto-migration from legacy paths."""
 
 import os
-from pathlib import Path
 from unittest.mock import patch
 
-from speeker.migrate import migrate, _needs_migration, _move, _marker_path
+from speeker.migrate import migrate, _needs_migration, _move
 
 
 class TestNeedsMigration:

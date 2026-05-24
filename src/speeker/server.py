@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from .queue_db import enqueue, get_pending_count, get_settings, set_settings, get_all_sessions, get_history
+from .queue_db import enqueue, get_pending_count
 from .cli import start_player
 from .summarize import summarize_for_speech, get_backend_info
 from .web import router as web_router

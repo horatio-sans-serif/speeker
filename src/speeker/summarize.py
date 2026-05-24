@@ -217,7 +217,7 @@ def clean_summary(text: str, max_words: int) -> str:
 
     # If there are multiple lines, take the last non-empty one
     # (LLMs often add headers before the actual summary)
-    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    lines = [line.strip() for line in text.split('\n') if line.strip()]
     if len(lines) > 1:
         # Take the last line that looks like a sentence
         for line in reversed(lines):

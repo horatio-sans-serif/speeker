@@ -26,8 +26,6 @@ from .voices import (
 )
 from .voice_prefs import (
     run_voice_prefs_server,
-    get_preferred_voice,
-    get_preferred_engine,
     ensure_all_samples,
     get_voice_prefs,
     BUNDLED_PREFS_FILE,
@@ -445,7 +443,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     if queue_file.exists():
         with open(queue_file) as f:
-            lines = [l.strip() for l in f if l.strip() and not l.startswith("#")]
+            lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
         print(f"Queue length: {len(lines)}")
     else:
         print("Queue length: 0")

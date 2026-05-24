@@ -6,7 +6,6 @@ import io
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
-import pytest
 
 from speeker.cli import (
     get_queue_file,

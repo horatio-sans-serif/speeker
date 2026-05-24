@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for queue_db functions."""
 
-import sqlite3
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pytest
 
 from speeker.queue_db import (
@@ -24,7 +22,6 @@ from speeker.queue_db import (
     set_last_utterance_time,
     search,
     search_fuzzy,
-    is_semantic_search_enabled,
 )
 
 
@@ -301,7 +298,7 @@ class TestEnqueue:
 
     def test_enqueue_session_id_merged_with_metadata(self, temp_db):
         """Test session_id is merged into metadata."""
-        item_id = enqueue("Test", metadata={"key": "value"}, session_id="myqueue")
+        enqueue("Test", metadata={"key": "value"}, session_id="myqueue")
         history = get_history(limit=1)
         assert len(history) > 0
         assert history[0]["session_id"] == "myqueue"
@@ -640,7 +637,7 @@ class TestSemanticSearchEnabled:
         mock_enabled.return_value = True
         # Without proper embedding setup, semantic search will return []
         enqueue("Test message")
-        result = search("test")
+        search("test")
         # Result depends on embedding setup
 
     @patch("speeker.queue_db.is_semantic_search_enabled")

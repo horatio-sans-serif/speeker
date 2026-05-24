@@ -20,7 +20,6 @@ from speeker.player import (
     POLL_INTERVAL,
     PAUSE_BETWEEN_MESSAGES,
     PAUSE_BETWEEN_SESSIONS,
-    ANNOUNCE_THRESHOLD_MINUTES,
 )
 
 
@@ -768,7 +767,7 @@ class TestSpeakTextPlayer:
         mock_gen.return_value = audio_file
         mock_play.return_value = True
 
-        result = player_speak_text("Hello world", verbose=False)
+        player_speak_text("Hello world", verbose=False)
 
         mock_play.assert_called_once()
 

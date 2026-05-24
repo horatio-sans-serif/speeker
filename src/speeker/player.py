@@ -6,6 +6,7 @@ Keeps TTS model warm for low-latency speech generation.
 
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -18,7 +19,6 @@ from .engines import get_engine, prepare_payload, unload_all
 from .ssml import looks_like_ssml
 from .paths import (
     audio_dir as _audio_dir,
-    cache_dir as _cache_dir,
     ensure_dir,
     player_lock_path,
     tone_intro_path as _tone_intro_path,
@@ -53,8 +53,6 @@ _outro_sound_path: Path | None = None
 _tone_cache: dict[str, Path] = {}
 
 # Musical note parsing for tone tokens
-import re
-
 NOTE_PATTERN = re.compile(r"^\s*\$([A-Ga-g])([b#]?)([0-8])")
 
 def parse_note_token(token: str) -> tuple[str, int] | None:
