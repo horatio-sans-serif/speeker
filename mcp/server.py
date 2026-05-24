@@ -73,16 +73,21 @@ def speak(
     engine: str | None = None,
     voice: str | None = None,
     queue: str | None = None,
+    ssml: bool = False,
+    polly_engine: str | None = None,
+    polly_voice: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate speech from text and queue for playback.
 
     Args:
-        text: The text to speak
-        engine: TTS engine to use: "pocket-tts" or "kokoro" (default: pocket-tts)
-        voice: Voice to use. Built-in voices depend on engine. Custom cloned voices
-               (created with `speeker voice-clone`) can also be used by name.
+        text: The text to speak (plain text, or SSML if ssml=True)
+        engine: TTS engine: "pocket-tts", "kokoro", or "polly" (default: pocket-tts)
+        voice: Voice to use (engine-specific; custom cloned voices allowed)
         queue: Queue name for grouping utterances (default: current project name)
+        ssml: Treat text as SSML (native on Polly; emulated/stripped on local engines)
+        polly_engine: Polly variant: "standard", "neural", "long-form", "generative"
+        polly_voice: Polly VoiceId (overrides voice when engine="polly")
 
     Returns:
         Dictionary with status, queue_id, and pending_count
@@ -94,9 +99,14 @@ def speak(
     metadata: dict[str, Any] = {"queue": queue or get_default_queue()}
     if engine:
         metadata["engine"] = engine
-    if voice:
-        metadata["voice"] = voice
+    chosen_voice = polly_voice or voice
+    if chosen_voice:
+        metadata["voice"] = chosen_voice
+    if polly_engine:
+        metadata["polly_engine"] = polly_engine
     data["metadata"] = metadata
+    if ssml:
+        data["ssml"] = True
 
     result = call_speeker("/speak", data)
 
@@ -188,6 +198,26 @@ def list_voices(engine: str | None = None) -> dict[str, Any]:
         }
 
     return result
+
+
+@mcp.tool()
+def generate_ssml(text: str, purpose: str = "audiobook") -> dict[str, Any]:
+    """
+    Convert plain text into purpose-tuned SSML (does not speak it).
+
+    Hand the returned SSML to speak(text=ssml, ssml=True) to play it.
+
+    Args:
+        text: The plain text to convert
+        purpose: Delivery style — "audiobook" (default), "article"/"news",
+                 "announcement", "conversational", "technical", or "plain"
+
+    Returns:
+        Dictionary with status, ssml, and purpose
+    """
+    if not text or not text.strip():
+        return {"status": "error", "error": "Text cannot be empty"}
+    return call_speeker("/ssml", {"text": text, "purpose": purpose})
 
 
 def _fallback_voices(engine: str | None = None) -> dict[str, Any]:

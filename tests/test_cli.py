@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for cli.py utility functions."""
 
+import argparse
+import io
 import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -223,17 +225,14 @@ class TestSpeakText:
 
     @patch("speeker.cli.queue_for_playback")
     @patch("speeker.cli.save_audio")
-    @patch("speeker.cli.generate_pocket_tts")
-    def test_speak_text_success(self, mock_gen, mock_save, mock_queue):
+    def test_speak_text_success(self, mock_save, mock_queue):
         """Test speak_text generates and queues audio."""
-        import numpy as np
-        mock_gen.return_value = (np.zeros(1000), 22050)
+        rec = _RecordingEngine()
         mock_save.return_value = Path("/tmp/test.wav")
-
-        result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
-
+        with patch("speeker.cli.get_engine", return_value=rec):
+            result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
         assert result is True
-        mock_gen.assert_called_once()
+        assert len(rec.calls) == 1
         mock_save.assert_called_once()
         mock_queue.assert_called_once()
 
@@ -248,29 +247,23 @@ class TestSpeakText:
         assert result is True
 
     @patch("speeker.cli.save_audio")
-    @patch("speeker.cli.generate_pocket_tts")
-    def test_speak_text_no_play(self, mock_gen, mock_save, capsys):
+    def test_speak_text_no_play(self, mock_save, capsys):
         """Test speak_text with no_play prints path."""
-        import numpy as np
-        mock_gen.return_value = (np.zeros(1000), 22050)
+        rec = _RecordingEngine()
         mock_save.return_value = Path("/tmp/test.wav")
-
-        result = speak_text("Hello", "pocket-tts", "azelma", True, False, False)
-
+        with patch("speeker.cli.get_engine", return_value=rec):
+            result = speak_text("Hello", "pocket-tts", "azelma", True, False, False)
         assert result is True
-        captured = capsys.readouterr()
-        assert "/tmp/test.wav" in captured.out
+        assert "/tmp/test.wav" in capsys.readouterr().out
 
-    @patch("speeker.cli.generate_pocket_tts")
-    def test_speak_text_handles_error(self, mock_gen, capsys):
+    def test_speak_text_handles_error(self, capsys):
         """Test speak_text handles generation error."""
-        mock_gen.side_effect = Exception("TTS failed")
-
-        result = speak_text("Hello", "pocket-tts", "azelma", False, False, False)
-
+        rec = _RecordingEngine()
+        rec.generate = MagicMock(side_effect=Exception("TTS failed"))
+        with patch("speeker.cli.get_engine", return_value=rec):
+            result = speak_text("Hello", "pocket-tts", "azelma", False, False, False)
         assert result is False
-        captured = capsys.readouterr()
-        assert "Error" in captured.err
+        assert "Error" in capsys.readouterr().err
 
 
 class TestSentenceEndPattern:
@@ -457,6 +450,11 @@ class TestCmdSpeak:
         args.no_play = False
         args.stdout = False
         args.stream = False
+        args.polly_voice = None
+        args.polly_engine = None
+        args.ssml = False
+        args.emulate_ssml = False
+        args.aws_profile = None
 
         result = cmd_speak(args)
 
@@ -479,6 +477,11 @@ class TestCmdSpeak:
         args.no_play = False
         args.stdout = False
         args.stream = False
+        args.polly_voice = None
+        args.polly_engine = None
+        args.ssml = False
+        args.emulate_ssml = False
+        args.aws_profile = None
 
         result = cmd_speak(args)
 
@@ -513,6 +516,9 @@ class TestCmdSpeak:
         args.text = "Hello"
         args.engine = "invalid-engine"
         args.voice = None
+        args.polly_voice = None
+        args.polly_engine = None
+        args.aws_profile = None
         args.quiet = False
         args.no_play = False
         args.stdout = False
@@ -532,6 +538,9 @@ class TestCmdSpeak:
         args.text = "Hello"
         args.engine = "pocket-tts"
         args.voice = "invalid-voice"
+        args.polly_voice = None
+        args.polly_engine = None
+        args.aws_profile = None
         args.quiet = False
         args.no_play = False
         args.stdout = False
@@ -734,29 +743,21 @@ class TestSpeakTextAdvanced:
 
     @patch("speeker.cli.queue_for_playback")
     @patch("speeker.cli.save_audio")
-    @patch("speeker.cli.generate_pocket_tts")
-    def test_speak_text_quiet_mode(self, mock_gen, mock_save, mock_queue, capsys):
+    def test_speak_text_quiet_mode(self, mock_save, mock_queue, capsys):
         """Test speak_text quiet mode doesn't print to stderr."""
-        import numpy as np
-        mock_gen.return_value = (np.zeros(1000), 22050)
+        rec = _RecordingEngine()
         mock_save.return_value = Path("/tmp/test.wav")
-
-        result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
-
+        with patch("speeker.cli.get_engine", return_value=rec):
+            result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
         assert result is True
-        captured = capsys.readouterr()
-        assert "Queued" not in captured.err
+        assert "Queued" not in capsys.readouterr().err
 
     @patch("speeker.cli.wavfile.write")
-    @patch("speeker.cli.generate_pocket_tts")
-    def test_speak_text_stdout_mode(self, mock_gen, mock_wavfile_write):
+    def test_speak_text_stdout_mode(self, mock_wavfile_write):
         """Test speak_text stdout mode writes to stdout."""
-        import numpy as np
-
-        mock_gen.return_value = (np.zeros(1000), 22050)
-
-        result = speak_text("Hello", "pocket-tts", "azelma", False, False, True)
-
+        rec = _RecordingEngine()
+        with patch("speeker.cli.get_engine", return_value=rec):
+            result = speak_text("Hello", "pocket-tts", "azelma", False, False, True)
         assert result is True
         mock_wavfile_write.assert_called_once()
 
@@ -779,6 +780,11 @@ class TestCmdSpeakStream:
         args.quiet = True
         args.no_play = False
         args.stdout = False
+        args.polly_voice = None
+        args.polly_engine = None
+        args.ssml = False
+        args.emulate_ssml = False
+        args.aws_profile = None
 
         result = cmd_speak_stream(args)
 
@@ -800,6 +806,11 @@ class TestCmdSpeakStream:
         args.quiet = True
         args.no_play = False
         args.stdout = False
+        args.polly_voice = None
+        args.polly_engine = None
+        args.ssml = False
+        args.emulate_ssml = False
+        args.aws_profile = None
 
         result = cmd_speak_stream(args)
 
@@ -812,6 +823,9 @@ class TestCmdSpeakStream:
         args = MagicMock()
         args.engine = "invalid"
         args.voice = None
+        args.polly_voice = None
+        args.polly_engine = None
+        args.aws_profile = None
         args.quiet = False
 
         result = cmd_speak_stream(args)
@@ -827,6 +841,9 @@ class TestCmdSpeakStream:
         args = MagicMock()
         args.engine = "pocket-tts"
         args.voice = "invalid-voice"
+        args.polly_voice = None
+        args.polly_engine = None
+        args.aws_profile = None
         args.quiet = False
 
         result = cmd_speak_stream(args)
@@ -851,3 +868,117 @@ class TestStartPlayerFallback:
             mock_exists.return_value = True
             start_player()
             mock_popen.assert_called_once()
+
+
+class _RecordingEngine:
+    name = "rec"
+    supports_ssml = False
+
+    def __init__(self):
+        self.calls = []
+
+    def default_voice(self):
+        return "azelma"
+
+    def validate_voice(self, voice):
+        return True
+
+    def generate(self, text, voice, *, is_ssml=False, **options):
+        import numpy as np
+        self.calls.append({"text": text, "voice": voice, "is_ssml": is_ssml, **options})
+        return np.zeros(8, dtype=np.float32), 16000
+
+
+class TestCliSsmlAndEngine:
+    def test_plain_text_preprocessed_and_generated(self, tmp_path):
+        from speeker import cli
+        rec = _RecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(cli, "get_engine", return_value=rec):
+            ok = cli.speak_text("Hello.", "pocket-tts", "azelma",
+                                no_play=True, quiet=True, stdout=False)
+        assert ok is True
+        assert len(rec.calls) == 1
+        assert rec.calls[0]["is_ssml"] is False
+
+    def test_ssml_local_engine_stripped(self, tmp_path):
+        from speeker import cli
+        rec = _RecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(cli, "get_engine", return_value=rec):
+            cli.speak_text("<speak>Hi <break/>there</speak>", "pocket-tts", "azelma",
+                           no_play=True, quiet=True, stdout=False, is_ssml=True)
+        assert rec.calls[0]["text"] == "Hi there"
+        assert rec.calls[0]["is_ssml"] is False
+
+    def test_polly_engine_passes_variant_and_ssml(self, tmp_path):
+        from speeker import cli
+        rec = _RecordingEngine()
+        rec.supports_ssml = True
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(cli, "get_engine", return_value=rec):
+            cli.speak_text("<speak>hi</speak>", "polly", "Joanna",
+                           no_play=True, quiet=True, stdout=False,
+                           is_ssml=True, polly_engine="generative")
+        assert rec.calls[0]["is_ssml"] is True
+        assert rec.calls[0]["polly_engine"] == "generative"
+
+    def test_parser_accepts_polly_and_ssml_flags(self):
+        from speeker.cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(
+            ["speak", "hi", "-e", "polly", "--polly-engine", "neural",
+             "--polly-voice", "Matthew", "--ssml", "--best-effort-ssml-emulation",
+             "--aws-profile", "personal"]
+        )
+        assert args.engine == "polly"
+        assert args.polly_engine == "neural"
+        assert args.polly_voice == "Matthew"
+        assert args.ssml is True
+        assert args.emulate_ssml is True
+        assert args.aws_profile == "personal"
+
+    def test_emulation_flag_defaults_none(self):
+        from speeker.cli import build_parser
+        args = build_parser().parse_args(["speak", "hi"])
+        assert args.emulate_ssml is None
+
+    def test_aws_profile_sets_env(self, tmp_path):
+        from speeker import cli
+        rec = _RecordingEngine()
+        rec.supports_ssml = True
+        args = argparse.Namespace(
+            text="hi", engine="polly", voice=None, polly_voice="Joanna",
+            polly_engine="neural", ssml=False, emulate_ssml=False,
+            aws_profile="personal", no_play=True, quiet=True, stdout=False, stream=False,
+        )
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(cli, "get_engine", return_value=rec):
+            cli.cmd_speak(args)
+            assert os.environ["AWS_PROFILE"] == "personal"
+
+
+class TestCliSsmlCommand:
+    def test_generates_to_stdout(self, tmp_path, capsys):
+        from speeker import cli
+        args = argparse.Namespace(purpose="plain")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch("sys.stdin", io.StringIO("Hello world.")):
+            rc = cli.cmd_ssml(args)
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert out.strip().startswith("<speak>")
+
+    def test_empty_stdin_errors(self, tmp_path, capsys):
+        from speeker import cli
+        args = argparse.Namespace(purpose="audiobook")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch("sys.stdin", io.StringIO("   ")):
+            rc = cli.cmd_ssml(args)
+        assert rc == 1
+
+    def test_parser_has_ssml_command(self):
+        from speeker.cli import build_parser
+        args = build_parser().parse_args(["ssml", "--purpose", "audiobook"])
+        assert args.purpose == "audiobook"
+        assert args.func.__name__ == "cmd_ssml"

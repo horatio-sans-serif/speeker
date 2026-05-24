@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Unit tests for ssml_generate.py."""
+
+from unittest.mock import patch
+
+from speeker import ssml_generate
+from speeker.ssml_generate import (
+    rule_based_ssml,
+    PURPOSE_PRESETS,
+    PURPOSE_ALIASES,
+    generate_ssml,
+)
+
+
+def _wrapped(s: str) -> bool:
+    return s.startswith("<speak>") and s.endswith("</speak>")
+
+
+class TestPresets:
+    def test_expected_purposes_present(self):
+        for p in ("audiobook", "article", "announcement", "conversational",
+                  "technical", "plain"):
+            assert p in PURPOSE_PRESETS
+
+    def test_news_alias(self):
+        assert PURPOSE_ALIASES["news"] == "article"
+
+
+class TestRuleBasedSsml:
+    def test_audiobook_structure(self):
+        out = rule_based_ssml("Para one.\n\nPara two.", "audiobook")
+        assert _wrapped(out)
+        assert '<prosody rate="95%">' in out
+        assert out.count("<p>") == 2
+        assert '<break time="800ms"/>' in out
+
+    def test_plain_has_no_prosody(self):
+        out = rule_based_ssml("Just text.", "plain")
+        assert _wrapped(out)
+        assert "<prosody" not in out
+
+    def test_announcement_emphasizes_first(self):
+        out = rule_based_ssml("Big news. Details.", "announcement")
+        assert "<emphasis" in out
+        assert "<break" in out
+
+    def test_technical_spells_acronyms(self):
+        out = rule_based_ssml("The PHI record.", "technical")
+        assert 'interpret-as="characters"' in out
+        assert "PHI" in out
+
+    def test_news_alias_resolves(self):
+        out = rule_based_ssml("Hello.", "news")
+        assert _wrapped(out)
+
+    def test_escapes_specials(self):
+        out = rule_based_ssml("Tom & Jerry", "audiobook")
+        assert "Tom &amp; Jerry" in out
+
+
+
+class TestGenerateSsml:
+    def test_build_prompt_resolves_alias(self):
+        from speeker.ssml_generate import build_prompt
+        prompt = build_prompt("Hello.", "news")  # alias for "article"
+        assert "Hello." in prompt
+        assert "article" in prompt
+
+    def test_unknown_purpose_raises(self):
+        import pytest
+        with pytest.raises(ValueError):
+            generate_ssml("hi", purpose="bogus")
+
+    def test_empty_text(self):
+        assert generate_ssml("   ", purpose="audiobook") == "<speak></speak>"
+
+    def test_no_backend_falls_back_to_rule_based(self):
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("", "", "", "")):
+            out = generate_ssml("Para one.\n\nPara two.", purpose="audiobook")
+        assert '<prosody rate="95%">' in out
+
+    def test_llm_output_sanitized_and_used(self):
+        llm = '```xml\n<speak>Hi <script>x</script><break time="500ms"/>there</speak>\n```'
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value=llm):
+            out = generate_ssml("whatever", purpose="conversational")
+        assert out.startswith("<speak>") and out.endswith("</speak>")
+        assert "<script>" not in out
+        assert '<break time="500ms"/>' in out
+
+    def test_invalid_llm_output_falls_back(self):
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value="<<<>>>"):
+            out = generate_ssml("Para one.\n\nPara two.", purpose="audiobook")
+        assert '<prosody rate="95%">' in out  # came from rule-based fallback

@@ -3,6 +3,7 @@
 
 import argparse
 import fcntl
+import os
 import re
 import select
 import shutil
@@ -10,7 +11,6 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from scipy.io import wavfile
@@ -20,9 +20,9 @@ from .preprocessing import preprocess_for_tts
 from .voices import (
     DEFAULT_ENGINE,
     get_default_voice,
-    get_pocket_tts_voice_path,
     get_voices,
     validate_voice,
+    POLLY_VARIANT_DEFAULT_VOICE,
 )
 from .voice_prefs import (
     run_voice_prefs_server,
@@ -32,15 +32,11 @@ from .voice_prefs import (
     get_voice_prefs,
     BUNDLED_PREFS_FILE,
 )
+from .engines import get_engine, prepare_payload
+from .ssml import looks_like_ssml
+from .config import get_ssml_config
 
-if TYPE_CHECKING:
-    from kokoro import KPipeline
-    from pocket_tts import TTSModel
-
-# Lazy-loaded TTS models (expensive to initialize)
-_pocket_tts_model: "TTSModel | None" = None
-_pocket_tts_voice_states: dict[str, Any] = {}
-_kokoro_pipeline: "KPipeline | None" = None
+KNOWN_ENGINES = ("pocket-tts", "kokoro", "polly")
 
 
 def get_queue_file() -> Path:
@@ -54,59 +50,29 @@ def ensure_output_dir() -> Path:
     return ensure_dir(_audio_dir() / today)
 
 
-def get_pocket_tts_model() -> "TTSModel":
-    """Lazy-load the pocket-tts model."""
-    global _pocket_tts_model
-    if _pocket_tts_model is None:
-        from pocket_tts import TTSModel
-
-        _pocket_tts_model = TTSModel.load_model()
-    return _pocket_tts_model
+def get_pocket_tts_model():
+    """Backwards-compatible accessor: the warm pocket-tts model."""
+    return get_engine("pocket-tts")._get_model()
 
 
-def get_pocket_tts_voice_state(voice: str) -> Any:
-    """Get or create voice state for pocket-tts."""
-    global _pocket_tts_voice_states
-    if voice not in _pocket_tts_voice_states:
-        model = get_pocket_tts_model()
-        voice_path = get_pocket_tts_voice_path(voice)
-        _pocket_tts_voice_states[voice] = model.get_state_for_audio_prompt(voice_path)
-    return _pocket_tts_voice_states[voice]
+def get_pocket_tts_voice_state(voice: str):
+    """Backwards-compatible accessor: a pocket-tts voice state."""
+    return get_engine("pocket-tts")._voice_state(voice)
 
 
-def get_kokoro_pipeline() -> "KPipeline":
-    """Lazy-load the kokoro pipeline."""
-    global _kokoro_pipeline
-    if _kokoro_pipeline is None:
-        from kokoro import KPipeline
-
-        _kokoro_pipeline = KPipeline(lang_code="a")
-    return _kokoro_pipeline
+def get_kokoro_pipeline():
+    """Backwards-compatible accessor: the kokoro pipeline."""
+    return get_engine("kokoro")._get_pipeline()
 
 
-def generate_pocket_tts(text: str, voice: str) -> tuple[np.ndarray, int]:
-    """Generate audio using pocket-tts."""
-    model = get_pocket_tts_model()
-    voice_state = get_pocket_tts_voice_state(voice)
-    audio = model.generate_audio(voice_state, text)
-    return audio.numpy(), model.sample_rate
+def generate_pocket_tts(text: str, voice: str):
+    """Backwards-compatible helper used by integration tests."""
+    return get_engine("pocket-tts").generate(text, voice)
 
 
-def generate_kokoro(text: str, voice: str) -> tuple[np.ndarray, int]:
-    """Generate audio using kokoro."""
-    pipeline = get_kokoro_pipeline()
-    generator = pipeline(text, voice=voice)
-
-    audio_chunks = []
-    for _, _, audio in generator:
-        audio_chunks.append(audio)
-
-    if not audio_chunks:
-        raise ValueError("Kokoro generated no audio")
-
-    audio = np.concatenate(audio_chunks)
-    sample_rate = 24000
-    return audio, sample_rate
+def generate_kokoro(text: str, voice: str):
+    """Backwards-compatible helper used by integration tests."""
+    return get_engine("kokoro").generate(text, voice)
 
 
 def save_audio(audio: np.ndarray, sample_rate: int, text: str) -> Path:
@@ -242,20 +208,38 @@ def queue_for_playback(audio_path: Path) -> None:
 
 
 def speak_text(
-    text: str, engine: str, voice: str, no_play: bool, quiet: bool, stdout: bool
+    text: str,
+    engine: str,
+    voice: str,
+    no_play: bool,
+    quiet: bool,
+    stdout: bool,
+    *,
+    is_ssml: bool = False,
+    polly_engine: str | None = None,
+    emulate: bool | None = None,
 ) -> bool:
     """Generate and optionally queue speech for a piece of text. Returns True on success."""
     if not text or not text.strip():
         return True  # Empty text is not an error
 
-    # Preprocess text for better TTS output
-    processed_text = preprocess_for_tts(text)
+    ssml_requested = is_ssml or looks_like_ssml(text)
 
     try:
-        if engine == "pocket-tts":
-            audio, sample_rate = generate_pocket_tts(processed_text, voice)
+        eng = get_engine(engine)
+        if ssml_requested:
+            if emulate is None:
+                emulate = get_ssml_config().get("emulate_for_local", False)
+            acronyms_file = get_ssml_config().get("acronyms_file")
+            payload, ssml_for_engine = prepare_payload(
+                eng, text, is_ssml=True, emulate=emulate, acronyms_file=acronyms_file
+            )
         else:
-            audio, sample_rate = generate_kokoro(processed_text, voice)
+            payload, ssml_for_engine = preprocess_for_tts(text), False
+
+        audio, sample_rate = eng.generate(
+            payload, voice, is_ssml=ssml_for_engine, polly_engine=polly_engine
+        )
 
         if stdout:
             audio_normalized = np.clip(audio, -1.0, 1.0)
@@ -269,12 +253,43 @@ def speak_text(
             queue_for_playback(audio_path)
             if not quiet:
                 print(f"Queued: {audio_path}", file=sys.stderr)
-
         return True
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return False
+
+
+def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
+    """Resolve the voice to use, honoring --polly-voice and per-variant defaults."""
+    if engine == "polly" and getattr(args, "polly_voice", None):
+        return args.polly_voice
+    if args.voice:
+        return args.voice
+    if engine == "polly":
+        variant = getattr(args, "polly_engine", None)
+        if variant:
+            return POLLY_VARIANT_DEFAULT_VOICE.get(variant, get_default_voice(engine))
+    return get_default_voice(engine)
+
+
+def _validate_engine_and_voice(engine: str, voice: str) -> bool:
+    """Print an error to stderr and return False if engine/voice is invalid."""
+    if engine not in KNOWN_ENGINES:
+        print(f"Error: Unknown engine '{engine}'.", file=sys.stderr)
+        return False
+    if not validate_voice(engine, voice):
+        available = list(get_voices(engine).get(engine, {}).keys())
+        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
+        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+        return False
+    return True
+
+
+def _apply_aws_profile(args: argparse.Namespace) -> None:
+    """Set AWS_PROFILE from --aws-profile so boto3 (Polly) picks it up."""
+    if getattr(args, "aws_profile", None):
+        os.environ["AWS_PROFILE"] = args.aws_profile
 
 
 # Sentence boundary pattern: ends with .!? followed by space, newline, or end of string
@@ -327,16 +342,10 @@ def stream_sentences_from_stdin():
 def cmd_speak_stream(args: argparse.Namespace) -> int:
     """Handle streaming speak mode - process sentences as they arrive."""
     engine = args.engine or DEFAULT_ENGINE
-    voice = args.voice or get_default_voice(engine)
+    voice = _resolve_voice(args, engine)
+    _apply_aws_profile(args)
 
-    if engine not in ("pocket-tts", "kokoro"):
-        print(f"Error: Unknown engine '{engine}'. Use 'pocket-tts' or 'kokoro'.", file=sys.stderr)
-        return 1
-
-    if not validate_voice(engine, voice):
-        available = list(get_voices(engine).get(engine, {}).keys())
-        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
-        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+    if not _validate_engine_and_voice(engine, voice):
         return 1
 
     if not args.quiet:
@@ -344,16 +353,18 @@ def cmd_speak_stream(args: argparse.Namespace) -> int:
 
     sentence_count = 0
     error_count = 0
-
     for sentence in stream_sentences_from_stdin():
-        if not speak_text(sentence, engine, voice, args.no_play, args.quiet, args.stdout):
+        if not speak_text(
+            sentence, engine, voice, args.no_play, args.quiet, args.stdout,
+            is_ssml=args.ssml, polly_engine=getattr(args, "polly_engine", None),
+            emulate=args.emulate_ssml,
+        ):
             error_count += 1
         else:
             sentence_count += 1
 
     if not args.quiet:
         print(f"Streamed {sentence_count} sentence(s)", file=sys.stderr)
-
     return 1 if error_count > 0 and sentence_count == 0 else 0
 
 
@@ -373,24 +384,21 @@ def cmd_speak(args: argparse.Namespace) -> int:
         return 1
 
     engine = args.engine or DEFAULT_ENGINE
-    voice = args.voice or get_default_voice(engine)
+    voice = _resolve_voice(args, engine)
+    _apply_aws_profile(args)
 
-    if engine not in ("pocket-tts", "kokoro"):
-        print(f"Error: Unknown engine '{engine}'. Use 'pocket-tts' or 'kokoro'.", file=sys.stderr)
-        return 1
-
-    if not validate_voice(engine, voice):
-        available = list(get_voices(engine).get(engine, {}).keys())
-        print(f"Error: Unknown voice '{voice}' for engine '{engine}'.", file=sys.stderr)
-        print(f"Available voices: {', '.join(available)}", file=sys.stderr)
+    if not _validate_engine_and_voice(engine, voice):
         return 1
 
     if not args.quiet:
         print(f"Generating speech with {engine}/{voice}...", file=sys.stderr)
 
-    if not speak_text(text, engine, voice, args.no_play, args.quiet, args.stdout):
+    if not speak_text(
+        text, engine, voice, args.no_play, args.quiet, args.stdout,
+        is_ssml=args.ssml, polly_engine=getattr(args, "polly_engine", None),
+        emulate=args.emulate_ssml,
+    ):
         return 1
-
     return 0
 
 
@@ -491,6 +499,22 @@ def cmd_bundle_prefs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ssml(args: argparse.Namespace) -> int:
+    """Read text on stdin, write purpose-tuned SSML to stdout."""
+    from .ssml_generate import generate_ssml
+
+    text = sys.stdin.read()
+    if not text or not text.strip():
+        print("Error: No input text on stdin", file=sys.stderr)
+        return 1
+    try:
+        print(generate_ssml(text, purpose=args.purpose))
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_voice_clone(args: argparse.Namespace) -> int:
     """Handle the voice-clone command."""
     from .voice_clone import clone_voice, get_custom_voices, delete_custom_voice
@@ -538,11 +562,8 @@ def cmd_voice_clone(args: argparse.Namespace) -> int:
         return 1
 
 
-def main() -> int:
-    """Main entry point."""
-    from .migrate import migrate
-    migrate()
-
+def build_parser() -> argparse.ArgumentParser:
+    """Build and return the argument parser."""
     parser = argparse.ArgumentParser(
         prog="speeker",
         description="Text-to-speech CLI with multiple engines and voice options",
@@ -554,7 +575,9 @@ def main() -> int:
     speak_parser.add_argument(
         "text", nargs="?", help="Text to speak (reads from stdin if not provided)"
     )
-    speak_parser.add_argument("-e", "--engine", choices=["pocket-tts", "kokoro"], help="TTS engine")
+    speak_parser.add_argument(
+        "-e", "--engine", choices=list(KNOWN_ENGINES), help="TTS engine"
+    )
     speak_parser.add_argument("-v", "--voice", help="Voice to use")
     speak_parser.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress progress messages"
@@ -571,12 +594,35 @@ def main() -> int:
         action="store_true",
         help="Stream mode: speak sentences as they arrive from stdin",
     )
+    speak_parser.add_argument(
+        "--polly-engine",
+        choices=["standard", "neural", "long-form", "generative"],
+        help="Polly engine variant (only used with -e polly)",
+    )
+    speak_parser.add_argument(
+        "--polly-voice", help="Polly VoiceId (overrides --voice when -e polly)"
+    )
+    speak_parser.add_argument(
+        "--ssml", action="store_true", help="Treat input as SSML"
+    )
+    speak_parser.add_argument(
+        "--best-effort-ssml-emulation", dest="emulate_ssml",
+        action="store_const", const=True, default=None,
+        help="Approximate SSML on local engines (spell acronyms, pauses as "
+             "punctuation, normalize ALL-CAPS). No effect on Polly. "
+             "Defaults to the ssml.emulate_for_local config setting.",
+    )
+    speak_parser.add_argument(
+        "--aws-profile",
+        help="AWS profile for Polly (sets AWS_PROFILE; overrides the default "
+             "credential chain). Equivalent to exporting AWS_PROFILE.",
+    )
     speak_parser.set_defaults(func=cmd_speak)
 
     # voices command
     voices_parser = subparsers.add_parser("voices", help="List available voices")
     voices_parser.add_argument(
-        "-e", "--engine", choices=["pocket-tts", "kokoro"], help="Filter by engine"
+        "-e", "--engine", choices=list(KNOWN_ENGINES), help="Filter by engine"
     )
     voices_parser.set_defaults(func=cmd_voices)
 
@@ -641,12 +687,39 @@ def main() -> int:
     )
     voice_clone_parser.set_defaults(func=cmd_voice_clone)
 
-    args = parser.parse_args()
+    # ssml command
+    from .ssml_generate import PURPOSE_PRESETS, PURPOSE_ALIASES
+    purpose_lines = "\n".join(
+        f"  {name:<14} {preset['description']}"
+        for name, preset in PURPOSE_PRESETS.items()
+    )
+    alias_lines = "\n".join(f"  {a:<14} alias for '{t}'" for a, t in PURPOSE_ALIASES.items())
+    ssml_parser = subparsers.add_parser(
+        "ssml",
+        help="Generate SSML from stdin text",
+        description="Read plain text on stdin and write purpose-tuned SSML to stdout.",
+        epilog="Purposes:\n" + purpose_lines + "\n" + alias_lines,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ssml_parser.add_argument(
+        "--purpose",
+        choices=list(PURPOSE_PRESETS) + list(PURPOSE_ALIASES),
+        default="audiobook",
+        help="Delivery style (default: audiobook)",
+    )
+    ssml_parser.set_defaults(func=cmd_ssml)
 
+    return parser
+
+
+def main() -> int:
+    from .migrate import migrate
+    migrate()
+    parser = build_parser()
+    args = parser.parse_args()
     if args.command is None:
         parser.print_help()
         return 0
-
     return args.func(args)
 
 

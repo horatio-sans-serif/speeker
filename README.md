@@ -11,7 +11,8 @@ A text-to-speech system with HTTP API, web UI, and CLI. Queue text for playback 
 
 - **HTTP API**: Queue text via REST endpoints with metadata support
 - **Web UI**: View queue history, play audio, search messages
-- **Multiple TTS engines**: pocket-tts (fast) and kokoro (higher quality)
+- **Multiple TTS engines**: pocket-tts (fast), kokoro (higher quality), and Amazon Polly (cloud, SSML-native)
+- **SSML support**: native on Polly; best-effort emulation on local engines
 - **Daemon mode**: Low-latency playback with warm TTS model
 - **Metadata**: Attach arbitrary key-value data to messages
 - **Search**: Fuzzy text search or semantic search with embeddings
@@ -183,16 +184,32 @@ Config file location (macOS: `~/Library/Application Support/speeker/config.json`
 
 When `model_idle_timeout_minutes` is 0 (default), the daemon preloads the TTS model at startup and keeps it in memory. Set to a positive value (e.g., 5) to unload the model after that many minutes of inactivity -- the model reloads automatically on the next request.
 
+#### `polly` section
+
+| Setting   | Default  | Description                                                   |
+| --------- | -------- | ------------------------------------------------------------- |
+| `region`  | null     | AWS region (null = boto3 default from profile/env)            |
+| `profile` | null     | AWS profile name (null = default credential chain)            |
+| `engine`  | "neural" | Polly engine variant: standard, neural, long-form, generative |
+| `voice`   | "Joanna" | Polly VoiceId                                                 |
+
+#### `ssml` section
+
+| Setting             | Default | Description                                                                                   |
+| ------------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `emulate_for_local` | false   | Approximate SSML on local engines (spell acronyms, pauses, casing)                            |
+| `acronyms_file`     | null    | Path to file of extra acronyms to spell out (whitespace, comma, pipe, or semicolon separated) |
+
 ### Settings (via Web UI or API)
 
 Settings are hierarchical: global defaults with per-session overrides.
 
-| Setting       | Default      | Description                    |
-| ------------- | ------------ | ------------------------------ |
-| `intro_sound` | true         | Play tone before/after batches |
-| `speed`       | 1.0          | Playback speed (0.5 - 2.0)     |
-| `engine`      | "pocket-tts" | TTS engine (pocket-tts/kokoro) |
-| `voice`       | "azelma"     | TTS voice name                 |
+| Setting       | Default      | Description                          |
+| ------------- | ------------ | ------------------------------------ |
+| `intro_sound` | true         | Play tone before/after batches       |
+| `speed`       | 1.0          | Playback speed (0.5 - 2.0)           |
+| `engine`      | "pocket-tts" | TTS engine (pocket-tts/kokoro/polly) |
+| `voice`       | "azelma"     | TTS voice name                       |
 
 ## Voices
 
@@ -215,6 +232,79 @@ Settings are hierarchical: global defaults with per-session overrides.
 | bm_george | British male, classic and articulate  |
 
 \* = default voice for engine
+
+### Amazon Polly (cloud, SSML-native)
+
+Requires the optional dependency and AWS credentials:
+
+```bash
+uv sync --extra polly   # installs boto3
+```
+
+Credentials come from the standard AWS chain (`~/.aws/credentials`, `AWS_PROFILE`,
+environment, or instance role). Configure region/profile/voice in `config.json`:
+
+```json
+{
+  "polly": {
+    "region": "us-east-1",
+    "profile": null,
+    "engine": "neural",
+    "voice": "Joanna"
+  }
+}
+```
+
+Selecting a profile (in order of precedence):
+
+- `speeker speak --aws-profile NAME ...` (CLI; sets `AWS_PROFILE` for that run)
+- `polly.profile` in `config.json`
+- the `AWS_PROFILE` environment variable (use this for the server/daemon, e.g.
+  `AWS_PROFILE=personal speeker-server`); `AWS_DEFAULT_REGION` selects the region
+
+Engine variants (`--polly-engine`): `standard` (cheapest), `neural` (natural,
+widest voice selection), `long-form` (narration), `generative` (most human).
+
+```bash
+speeker speak -e polly --polly-engine neural --polly-voice Matthew --aws-profile personal "Hello there."
+speeker speak -e polly --polly-engine long-form --polly-voice Danielle < chapter.txt
+```
+
+## SSML
+
+Mark input as SSML with `--ssml`, or it is auto-detected when the text starts
+with `<speak>`:
+
+```bash
+speeker speak -e polly --ssml '<speak>Hello <break time="500ms"/> world.</speak>'
+```
+
+- **Polly** renders SSML natively.
+- **Local engines** (pocket-tts, kokoro) do not support SSML. By default the tags
+  are stripped to plain text. With `--best-effort-ssml-emulation` (or
+  `ssml.emulate_for_local: true` in config), Speeker approximates SSML: spelling
+  acronyms (`<say-as interpret-as="characters">PHI</say-as>` → "P-H-I"), turning
+  `<break>` into punctuation, and normalizing ALL-CAPS so the engine does not shout.
+
+Extra acronyms to spell out can be listed in a file referenced by
+`ssml.acronyms_file` (tokens separated by whitespace, commas, pipes, or semicolons);
+they are merged with the built-in set.
+
+### Generating SSML
+
+`speeker ssml` reads plain text on stdin and writes purpose-tuned SSML to stdout.
+It uses the configured LLM backend when available and falls back to a rule-based
+generator; output is always sanitized to Polly-safe tags.
+
+```bash
+speeker ssml --purpose audiobook < chapter.txt | speeker speak --ssml -e polly --polly-engine long-form
+```
+
+Purposes: `audiobook` (default), `article` (alias `news`), `announcement`,
+`conversational`, `technical`, `plain`. Run `speeker ssml --help` for descriptions.
+
+Also available over HTTP (`POST /ssml` with `{"text": "...", "purpose": "..."}`)
+and as the MCP `generate_ssml` tool.
 
 ## Architecture
 

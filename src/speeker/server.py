@@ -17,9 +17,11 @@ from .web import router as web_router
 from .voices import (
     POCKET_TTS_VOICES,
     KOKORO_VOICES,
+    POLLY_VOICES,
     DEFAULT_ENGINE,
     DEFAULT_POCKET_TTS_VOICE,
     DEFAULT_KOKORO_VOICE,
+    DEFAULT_POLLY_VOICE,
 )
 
 
@@ -40,8 +42,14 @@ def extract_title(request: Request) -> str | None:
     return request.query_params.get("title")
 
 
-def format_with_title(text: str, title: str | None) -> str:
-    """Format text with optional title prefix and attention tone."""
+def format_with_title(text: str, title: str | None, is_ssml: bool = False) -> str:
+    """Format text with optional title prefix and attention tone.
+
+    When is_ssml is True, the title prefix is skipped: prepending spoken text
+    before a <speak> root produces invalid SSML.
+    """
+    if is_ssml:
+        return text
     if title:
         return f"$Eb4 {title}. {text}"
     return text
@@ -65,6 +73,7 @@ def elide_message_count(text: str) -> str:
 class SpeakRequest(BaseModel):
     text: str
     metadata: dict | None = None
+    ssml: bool = False
     session_id: str | None = None  # Deprecated
 
 
@@ -89,6 +98,18 @@ class SummarizeResponse(BaseModel):
     original_length: int | None = None
     summary_length: int | None = None
     pending_count: int | None = None
+    error: str | None = None
+
+
+class SsmlRequest(BaseModel):
+    text: str
+    purpose: str = "audiobook"
+
+
+class SsmlResponse(BaseModel):
+    status: str
+    ssml: str | None = None
+    purpose: str | None = None
     error: str | None = None
 
 
@@ -150,10 +171,17 @@ async def speak(body: SpeakRequest, request: Request):
         if body.session_id and "queue" not in metadata:
             metadata["queue"] = body.session_id
 
+        # Compute ssml flag before format_with_title so we can skip the title
+        # prefix when input is SSML (prepending text before <speak> is invalid).
+        ssml = body.ssml or request.query_params.get("ssml", "").lower() == "true"
+
         # Apply title prefix if provided
         title = extract_title(request)
         text = elide_message_count(text)
-        text = format_with_title(text, title)
+        text = format_with_title(text, title, is_ssml=ssml)
+
+        if ssml:
+            metadata["ssml"] = True
 
         # Queue the text for playback
         queue_id = enqueue(text, metadata=metadata if metadata else None)
@@ -233,6 +261,20 @@ async def summarize_and_speak(body: SummarizeRequest, request: Request):
         )
 
 
+@app.post("/ssml", response_model=SsmlResponse)
+async def make_ssml(body: SsmlRequest):
+    """Generate purpose-tuned SSML from plain text. Pure transform; no enqueue."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Text cannot be empty")
+    try:
+        from .ssml_generate import generate_ssml
+        ssml = generate_ssml(text, purpose=body.purpose)
+        return SsmlResponse(status="success", ssml=ssml, purpose=body.purpose)
+    except ValueError as e:
+        return SsmlResponse(status="error", error=str(e))
+
+
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -272,6 +314,8 @@ async def get_voices(engine: str | None = None):
         engines["pocket-tts"] = format_voices(POCKET_TTS_VOICES, DEFAULT_POCKET_TTS_VOICE)
     if engine is None or engine == "kokoro":
         engines["kokoro"] = format_voices(KOKORO_VOICES, DEFAULT_KOKORO_VOICE)
+    if engine is None or engine == "polly":
+        engines["polly"] = format_voices(POLLY_VOICES, DEFAULT_POLLY_VOICE)
 
     # Include custom cloned voices
     if engine is None or engine == "custom":
@@ -288,7 +332,7 @@ async def get_voices(engine: str | None = None):
                 },
             }
 
-    known_engines = {"pocket-tts", "kokoro", "custom"}
+    known_engines = {"pocket-tts", "kokoro", "polly", "custom"}
     if engine and engine not in known_engines:
         return {"status": "error", "error": f"Unknown engine: {engine}"}
 

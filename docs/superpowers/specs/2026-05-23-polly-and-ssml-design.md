@@ -1,0 +1,270 @@
+# Amazon Polly + SSML Support — Design
+
+**Date:** 2026-05-23
+**Status:** Approved (design), pending implementation plan
+
+## Goal
+
+Add Amazon Polly as a third TTS engine and add SSML (Speech Synthesis Markup
+Language) support to Speeker. Polly supports SSML natively; the local engines
+(pocket-tts, kokoro) get a best-effort SSML emulation gated behind a flag.
+
+Plus a bonus feature: an **SSML generator** that reads plain text on stdin and
+writes purpose-tuned SSML to stdout (e.g. audiobook narration), composing with
+the consumer above:
+
+```bash
+speeker ssml --purpose audiobook < chapter.txt | speeker speak --ssml -e polly --polly-engine long-form
+```
+
+## Background — current architecture
+
+Two generation paths exist today and they do not share code:
+
+- **Main flow (server + MCP):** `POST /speak` → `enqueue(text, metadata)` into
+  the SQLite queue → the **player daemon** polls and generates TTS at playback
+  time. `player.py:generate_tts` is **hardcoded to pocket-tts** and ignores the
+  `engine` value stored in the `settings` table (and the `engine` passed by the
+  MCP tool). So today neither kokoro nor anything else actually plays through the
+  daemon path that the server and MCP use.
+- **CLI direct flow:** `speeker speak` has its own `pocket-tts`/`kokoro`
+  if/else dispatch in `cli.py:speak_text`, pre-generates audio, and writes file
+  paths to a file-based queue.
+
+Consequences this design addresses:
+
+- pocket-tts model handling is duplicated in `cli.py` and `player.py`.
+- The daemon must be changed to honor the stored `engine` setting, or Polly can
+  never play through the server/MCP path (the path everything actually uses).
+- `preprocess_for_tts` rewrites text aggressively (`.` → " dot ", symbol
+  expansion). SSML markup fed through it would be destroyed, so SSML must bypass
+  or be handled before preprocessing.
+
+## Decisions
+
+### SSML behavior across engines
+
+- **Polly:** native SSML via `TextType='ssml'`.
+- **Local engines (pocket-tts, kokoro):** when best-effort emulation is enabled,
+  transform SSML into plain text approximating the intent. When disabled, naive
+  tag-stripping to text content.
+- Emulation is gated behind `--best-effort-ssml-emulation` (CLI) /
+  `ssml.emulate_for_local` (config). CLI flag overrides config for that run.
+
+Emulation transforms (rule-based, deterministic, offline, no LLM in the hot path):
+
+- `<say-as interpret-as="characters">PHI</say-as>` /
+  `interpret-as="spell-out"` → `P-H-I`.
+- `<sub alias="...">text</sub>` → the alias text.
+- `<break .../>` and prosody pauses → punctuation chosen by duration
+  (short → comma, medium → period, long → ellipsis).
+- All-caps runs and `<emphasis>` content → case-normalized so local engines do
+  not shout or mis-spell. A word in the **spell-out set** is rendered `P-H-I`
+  instead of normalized.
+- Any other tag → replaced by its text content.
+
+### Acronym (spell-out) set
+
+- Built-in `COMMON_ACRONYMS` set.
+- Plus a user file pointed to by `ssml.acronyms_file` config. File tokens are
+  split on `[,\s|;]+` (whitespace, commas, pipes, semicolons), merged into the
+  built-in set.
+
+### SSML signaling
+
+- A caller signals SSML by **explicit flag** (`--ssml` CLI, `ssml=true` in
+  `/speak` body or `?ssml=true` query, `ssml=True` MCP tool) **OR** by
+  **auto-detection** of a leading `<speak>` wrapper.
+- Propagated through the queue via the existing `metadata` JSON column as
+  `{"ssml": true}`. No schema migration. Auto-detect covers `<speak>`-prefixed
+  text even without the flag.
+
+### Polly specifics
+
+- One Speeker engine: `-e polly`. Its variant is a sub-option:
+  `--polly-engine={standard,neural,long-form,generative}` and
+  `--polly-voice=VOICE`.
+- Per-variant default voices (config-overridable; `describe_voices` is the real
+  source of truth, catalog varies by region): standard→Joanna, neural→Joanna,
+  long-form→Danielle, generative→Ruth.
+- Credentials via boto3 default chain (`~/.aws/credentials` profiles,
+  `AWS_PROFILE`, env). `polly.region` / `polly.profile` only override when set.
+- Audio: request `OutputFormat='pcm'` (16-bit / 16 kHz mono). Convert int16 →
+  float32 in `[-1, 1]` so it flows through the existing normalize → int16 → WAV
+  pipeline with no ffmpeg decode step.
+
+### Engine abstraction (Approach A)
+
+`engines.py` defines an `Engine` interface and a registry. Both `cli.py` and
+`player.py` call through it, removing the duplicated model handling and the
+daemon's hardcoding.
+
+Interface:
+
+- `name: str`
+- `supports_ssml: bool`
+- `default_voice: str`
+- `list_voices() -> dict[str, str]`
+- `validate_voice(voice: str) -> bool`
+- `generate(text: str, voice: str, *, is_ssml: bool) -> tuple[np.ndarray, int]`
+  returns `(float32 audio in [-1, 1], sample_rate)`.
+- `warm() -> None` and `unload() -> None` so the daemon's idle-timeout memory
+  logic keeps working. For Polly both are no-ops (holds only a cheap boto3
+  client).
+
+Implementations: `PocketTTSEngine`, `KokoroEngine`, `PollyEngine`. Lazy imports
+per engine so `boto3` / `kokoro` / `pocket_tts` only load when that engine is
+used. `get_engine(name)` returns a cached singleton (each holds its own warm
+model state where applicable).
+
+## Bonus feature — SSML generation
+
+Reads plain text on stdin (or a request body), produces purpose-tuned SSML,
+writes it to stdout (or returns it). It is a pure transform: it does **not**
+enqueue or speak.
+
+### Generation method — hybrid (mirrors `summarize.py`)
+
+- If an `llm` backend is configured, build a purpose-specific prompt and call
+  `summarize.call_llm(prompt)` (reused as-is — no new backend dispatch), then
+  sanitize the result.
+- If no backend is configured, or the call fails/returns junk, fall back to a
+  **rule-based** generator.
+- **Either path's output is run through `sanitize_ssml`** before being returned,
+  so callers always get valid, Polly-safe SSML.
+
+### Purpose presets
+
+`--purpose` selects a preset. Each preset drives both the LLM prompt guidance and
+the rule-based generator. Every preset is documented in `--help` (argparse
+`choices` + an epilog describing each) and in the README.
+
+- `audiobook` (**default**): narration feel. `<prosody rate="95%">`, paragraphs
+  as `<p>` with ~800 ms breaks between them, natural sentence pacing.
+- `article` (alias `news`): measured and clear. `<prosody rate="100%">`,
+  moderate paragraph breaks.
+- `announcement`: emphatic. Leading `<break>`, `<emphasis level="strong">` on the
+  opening sentence, slightly slower rate.
+- `conversational`: lighter and quicker. `<prosody rate="105%">`, short natural
+  breaks.
+- `technical`: spells identifiers/acronyms via
+  `<say-as interpret-as="characters">` using the spell-out set; slower rate.
+- `plain`: just `<speak>`-wrap and XML-escape; no added markup.
+
+### Sanitizer (`sanitize_ssml`, in `ssml.py`)
+
+Robust against malformed LLM output — built on the same whitelist-driven tag
+tokenizer used by `strip_ssml`/`emulate_ssml`, **not** a strict XML parser, so it
+degrades gracefully:
+
+- Keep only tags on the Polly-safe whitelist (`speak`, `break`, `emphasis`,
+  `lang`, `mark`, `p`, `s`, `phoneme`, `prosody`, `say-as`, `sub`, `w`, plus
+  documented `amazon:*` extensions); replace any other tag with its text content.
+- Guarantee exactly one `<speak>` root (wrap if missing, unwrap nesting).
+- XML-escape stray `&`/`<`/`>` in text nodes.
+- Attributes pass through; Polly remains the authority on attribute validity.
+
+No new third-party dependency — stdlib only.
+
+### Surface for the generator
+
+- **CLI:** `speeker ssml [--purpose P]` — stdin → SSML on stdout.
+- **Server:** `POST /ssml` with `{text, purpose}` → `{status, ssml, purpose,
+backend_used}`. Pure transform; no enqueue.
+- **MCP:** `generate_ssml(text, purpose="audiobook")` calling `/ssml`; returns the
+  SSML so an agent can hand it to `speak(ssml=True)`.
+
+## SSML flow (per utterance)
+
+1. Extract leading `$Note` tone tokens first (preserves current behavior; SSML
+   survives because tone tokens strip away before the `<speak>` wrapper).
+2. `is_ssml` = explicit flag OR `looks_like_ssml(remaining_text)`.
+3. If engine `supports_ssml` (Polly): `ensure_speak_wrapped`, send with
+   `TextType='ssml'`, **bypass** `preprocess_for_tts`.
+4. Else (local): if emulation enabled → `emulate_ssml(text, acronyms)`; else →
+   `strip_ssml(text)`. Result is the final spoken text — `preprocess_for_tts` is
+   **skipped** for the SSML path to avoid re-mangling spelled-out letters.
+   Non-SSML text is unchanged: normal `preprocess_for_tts`.
+
+## Config additions
+
+```jsonc
+"polly": {
+  "region": null,      // null = boto3 default
+  "profile": null,     // null = default credential chain
+  "engine": "neural",  // default Polly variant
+  "voice": "Joanna"    // default Polly VoiceId
+},
+"ssml": {
+  "emulate_for_local": false,  // CLI --best-effort-ssml-emulation enables
+  "acronyms_file": null        // path to extra acronyms file
+}
+```
+
+Accessors `get_polly_config()` and `get_ssml_config()` follow the existing
+section-merge pattern in `config.py`.
+
+## Surface-area changes
+
+- **`engines.py`** (new): `Engine` interface, three implementations,
+  `get_engine()` registry.
+- **`ssml.py`** (new): consumption + sanitization primitives —
+  `looks_like_ssml`, `ensure_speak_wrapped`, `strip_ssml`, `emulate_ssml`,
+  `sanitize_ssml`, `load_acronyms`, `COMMON_ACRONYMS`, the Polly-safe tag
+  whitelist, and the shared whitelist-driven tag tokenizer they build on.
+- **`ssml_generate.py`** (new): the generator — `PURPOSE_PRESETS`,
+  `generate_ssml(text, purpose)` (hybrid; reuses `summarize.call_llm`),
+  `rule_based_ssml(text, purpose)`, and the per-purpose prompt builder. Output
+  always passed through `ssml.sanitize_ssml`.
+- **`voices.py`**: add `POLLY_VOICES` (curated), `DEFAULT_POLLY_VOICE`,
+  `DEFAULT_POLLY_ENGINE`; lenient `validate_voice("polly", ...)` (Polly is the
+  authority); register `"polly"` in `get_voices`.
+- **`cli.py`**: `-e polly`, `--polly-engine`, `--polly-voice`, `--ssml`,
+  `--best-effort-ssml-emulation`; route generation through `get_engine()`. New
+  `ssml` subcommand (`--purpose`, stdin → stdout) with `--help` enumerating every
+  purpose.
+- **`player.py`**: replace hardcoded `generate_tts` with
+  `get_engine(settings["engine"]).generate(...)`; warm/unload the active engine;
+  read `is_ssml` from queue metadata (extend `get_pending_for_session` to return
+  `metadata`).
+- **`server.py`**: `/speak` accepts `ssml` (body field + `?ssml=true`); add
+  `polly` to `/voices`; new `POST /ssml` generation endpoint.
+- **`mcp/server.py`**: `speak(..., ssml=False)`, allow `engine="polly"` with
+  optional `polly_engine` / `polly_voice` passed via metadata; new
+  `generate_ssml(text, purpose="audiobook")` tool.
+- **`README.md`**: document the `polly` engine and its variants/voices, SSML
+  input (flag + auto-detect, local emulation + acronym file), and the `ssml`
+  generator command, all purposes, the pipe composition, and the `/ssml` endpoint
+  - MCP tool.
+- **`pyproject.toml`**: `[project.optional-dependencies] polly = ["boto3"]`.
+
+## Explicitly out of scope (kept minor on purpose)
+
+- Polly voices appear in `speeker voices` and are selectable, but are **not**
+  added to the `voice-prefs` sample-ranking UI in this change — generating
+  ranking samples there would fire billable Polly calls for every voice.
+- No LLM-assisted SSML emulation. Case normalization is rule-based using the
+  acronym spell-out set.
+- `summarize` produces plain text; it does not emit or accept SSML.
+
+## Testing
+
+- `ssml.py`: detect / strip / emulate; acronym-file parsing across all
+  separators (`[,\s|;]+`); break-duration → punctuation mapping; say-as and sub
+  handling; all-caps normalization with and without spell-out membership.
+  `sanitize_ssml`: drops disallowed tags (keeps text), enforces a single
+  `<speak>` root, XML-escapes stray characters, and survives malformed input.
+- `ssml_generate.py`: `rule_based_ssml` per purpose produces sanitized,
+  well-formed SSML with the expected structure (prosody rate, paragraph breaks,
+  technical say-as). `generate_ssml` hybrid: with `call_llm` monkeypatched returns
+  sanitized LLM output; with no backend falls back to `rule_based_ssml`; with the
+  LLM returning invalid markup the result is still valid SSML after sanitize.
+- `engines.py`: registry returns cached singletons; `PollyEngine` with `boto3`
+  mocked (no live AWS) — verify `TextType`, `Engine`, `VoiceId`, `OutputFormat`
+  args and PCM → float32 conversion; `warm`/`unload` no-ops for Polly.
+- `config.py`: `get_polly_config` / `get_ssml_config` defaults and merge.
+- `player.py`: daemon dispatches by the stored `engine` setting (proves the
+  hardcoding is fixed); `is_ssml` read from queue metadata.
+- CLI `ssml` command (stdin → stdout, unknown purpose errors), `POST /ssml`
+  endpoint, and the MCP `generate_ssml` tool — generator mocked.
+- All Polly tests mock boto3; no test requires AWS credentials or network.

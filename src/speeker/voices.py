@@ -26,9 +26,29 @@ KOKORO_VOICES = {
     "bm_lewis": "British male, modern and conversational",
 }
 
+POLLY_VOICES = {
+    "Joanna": "US English, female (standard/neural)",
+    "Matthew": "US English, male (standard/neural)",
+    "Danielle": "US English, female (long-form)",
+    "Gregory": "US English, male (long-form)",
+    "Ruth": "US English, female (generative)",
+    "Amy": "British English, female (neural)",
+    "Brian": "British English, male (neural)",
+}
+
+# Default Polly voice per engine variant.
+POLLY_VARIANT_DEFAULT_VOICE = {
+    "standard": "Joanna",
+    "neural": "Joanna",
+    "long-form": "Danielle",
+    "generative": "Ruth",
+}
+
 DEFAULT_ENGINE = "pocket-tts"
 DEFAULT_POCKET_TTS_VOICE = "azelma"
 DEFAULT_KOKORO_VOICE = "am_liam"
+DEFAULT_POLLY_VOICE = "Joanna"
+DEFAULT_POLLY_ENGINE = "neural"  # Polly engine variant
 
 
 def is_custom_voice(name: str) -> bool:
@@ -45,6 +65,8 @@ def get_voices(engine: str | None = None) -> dict[str, dict[str, str]]:
         result["pocket-tts"] = POCKET_TTS_VOICES
     if engine is None or engine == "kokoro":
         result["kokoro"] = KOKORO_VOICES
+    if engine is None or engine == "polly":
+        result["polly"] = POLLY_VOICES
 
     # Include custom voices when not filtering to a specific engine,
     # or when explicitly requesting custom voices.
@@ -65,6 +87,8 @@ def get_default_voice(engine: str) -> str:
     """Get the default voice for an engine."""
     if engine == "kokoro":
         return DEFAULT_KOKORO_VOICE
+    if engine == "polly":
+        return DEFAULT_POLLY_VOICE
     return DEFAULT_POCKET_TTS_VOICE
 
 
@@ -74,6 +98,9 @@ def validate_voice(engine: str, voice: str) -> bool:
         return voice in POCKET_TTS_VOICES or is_custom_voice(voice)
     if engine == "kokoro":
         return voice in KOKORO_VOICES
+    if engine == "polly":
+        # Polly's catalog is large and region-dependent; Polly is the authority.
+        return isinstance(voice, str) and bool(voice.strip())
     return False
 
 

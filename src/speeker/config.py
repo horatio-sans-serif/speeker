@@ -19,6 +19,16 @@ DEFAULT_CONFIG = {
     "player": {
         "model_idle_timeout_minutes": 0,  # 0 = never unload
     },
+    "polly": {
+        "region": None,    # None = boto3 default (profile/env region)
+        "profile": None,   # AWS profile name; None = default credential chain
+        "engine": "neural",  # default Polly engine variant
+        "voice": "Joanna",   # default Polly VoiceId
+    },
+    "ssml": {
+        "emulate_for_local": False,  # if True, approximate SSML for local TTS engines
+        "acronyms_file": None,       # path to a file of extra spell-out acronyms
+    },
 }
 
 
@@ -96,3 +106,15 @@ def get_llm_config() -> dict:
         "api_key": api_key,
         "model": model,
     }
+
+
+def get_polly_config() -> dict:
+    """Get Amazon Polly configuration."""
+    config = get_config()
+    return config.get("polly", {})
+
+
+def get_ssml_config() -> dict:
+    """Get SSML configuration."""
+    config = get_config()
+    return config.get("ssml", {})
