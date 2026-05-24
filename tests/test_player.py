@@ -1078,21 +1078,35 @@ class TestGenerateTtsDispatch:
 
 class TestProcessQueueSsml:
     def test_ssml_item_spoken_verbatim(self, tmp_path):
+        import speeker.queue_db as _qdb
         from speeker import player
         from speeker.queue_db import enqueue
-        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            # Two items so build_session_script would prefix each ("First: ", "Last: ").
-            enqueue("plain message", metadata={"queue": "q1"})
-            enqueue("<speak>Hi there</speak>", metadata={"queue": "q1", "ssml": True})
 
-            captured = []
+        # Reset cached connection before entering the isolated DB so we don't
+        # pin a stale connection from a previously-run test (mirrors temp_db fixture).
+        if hasattr(_qdb._local, "conn") and _qdb._local.conn:
+            _qdb._local.conn.close()
+        _qdb._local.conn = None
 
-            def fake_speak(line, **kw):
-                captured.append((line, kw))
-                return kw.get("save_path")
+        try:
+            with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+                # Two items so build_session_script would prefix each ("First: ", "Last: ").
+                enqueue("plain message", metadata={"queue": "q1"})
+                enqueue("<speak>Hi there</speak>", metadata={"queue": "q1", "ssml": True})
 
-            with patch.object(player, "speak_text", side_effect=fake_speak):
-                player.process_queue(verbose=False)
+                captured = []
+
+                def fake_speak(line, **kw):
+                    captured.append((line, kw))
+                    return kw.get("save_path")
+
+                with patch.object(player, "speak_text", side_effect=fake_speak):
+                    player.process_queue(verbose=False)
+        finally:
+            # Reset again so subsequent tests reconnect to their own DB.
+            if hasattr(_qdb._local, "conn") and _qdb._local.conn:
+                _qdb._local.conn.close()
+            _qdb._local.conn = None
 
         ssml_lines = [line for line, kw in captured if kw.get("is_ssml")]
         assert ssml_lines == ["<speak>Hi there</speak>"]

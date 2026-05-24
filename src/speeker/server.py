@@ -42,8 +42,14 @@ def extract_title(request: Request) -> str | None:
     return request.query_params.get("title")
 
 
-def format_with_title(text: str, title: str | None) -> str:
-    """Format text with optional title prefix and attention tone."""
+def format_with_title(text: str, title: str | None, is_ssml: bool = False) -> str:
+    """Format text with optional title prefix and attention tone.
+
+    When is_ssml is True, the title prefix is skipped: prepending spoken text
+    before a <speak> root produces invalid SSML.
+    """
+    if is_ssml:
+        return text
     if title:
         return f"$Eb4 {title}. {text}"
     return text
@@ -165,13 +171,15 @@ async def speak(body: SpeakRequest, request: Request):
         if body.session_id and "queue" not in metadata:
             metadata["queue"] = body.session_id
 
+        # Compute ssml flag before format_with_title so we can skip the title
+        # prefix when input is SSML (prepending text before <speak> is invalid).
+        ssml = body.ssml or request.query_params.get("ssml", "").lower() == "true"
+
         # Apply title prefix if provided
         title = extract_title(request)
         text = elide_message_count(text)
-        text = format_with_title(text, title)
+        text = format_with_title(text, title, is_ssml=ssml)
 
-        # Persist ssml flag from body or query param
-        ssml = body.ssml or request.query_params.get("ssml", "").lower() == "true"
         if ssml:
             metadata["ssml"] = True
 

@@ -583,6 +583,26 @@ class TestSsmlAndPolly:
             assert "polly" in data["engines"]
             assert "Joanna" in data["engines"]["polly"]["voices"]
 
+    def test_ssml_with_title_not_corrupted(self, tmp_path):
+        import speeker.queue_db as _qdb
+        if hasattr(_qdb._local, "conn") and _qdb._local.conn:
+            _qdb._local.conn.close()
+        _qdb._local.conn = None
+        try:
+            with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+                from fastapi.testclient import TestClient
+                from speeker.server import app
+                from speeker.queue_db import get_history
+                c = TestClient(app)
+                r = c.post("/speak?title=Heads%20up", json={"text": "<speak>hi</speak>", "ssml": True})
+                assert r.json()["status"] == "success"
+                text = get_history(limit=1)[0]["text"]
+                assert text.lstrip().startswith("<speak")  # no title/tone before the SSML root
+        finally:
+            if hasattr(_qdb._local, "conn") and _qdb._local.conn:
+                _qdb._local.conn.close()
+            _qdb._local.conn = None
+
 
 class TestSsmlEndpoint:
     def test_generate_ssml(self, tmp_path):

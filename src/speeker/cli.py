@@ -606,9 +606,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ssml", action="store_true", help="Treat input as SSML"
     )
     speak_parser.add_argument(
-        "--best-effort-ssml-emulation", dest="emulate_ssml", action="store_true",
+        "--best-effort-ssml-emulation", dest="emulate_ssml",
+        action="store_const", const=True, default=None,
         help="Approximate SSML on local engines (spell acronyms, pauses as "
-             "punctuation, normalize ALL-CAPS). No effect on Polly.",
+             "punctuation, normalize ALL-CAPS). No effect on Polly. "
+             "Defaults to the ssml.emulate_for_local config setting.",
     )
     speak_parser.add_argument(
         "--aws-profile",

@@ -938,6 +938,11 @@ class TestCliSsmlAndEngine:
         assert args.emulate_ssml is True
         assert args.aws_profile == "personal"
 
+    def test_emulation_flag_defaults_none(self):
+        from speeker.cli import build_parser
+        args = build_parser().parse_args(["speak", "hi"])
+        assert args.emulate_ssml is None
+
     def test_aws_profile_sets_env(self, tmp_path):
         from speeker import cli
         rec = _RecordingEngine()
