@@ -1,5 +1,7 @@
 #!/bin/bash
-# Run the Speeker TTS MCP server
+# Run the Speeker TTS MCP server.
+# Use `uv run` so the environment is resolved from pyproject.toml/uv.lock at the
+# script's own location — this survives moving the project (a hardcoded-path
+# .venv/bin/activate does not).
 cd "$(dirname "$0")"
-source .venv/bin/activate
-exec python server.py
+exec uv run --quiet python server.py
