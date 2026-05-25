@@ -91,6 +91,41 @@ def test_mixed_content():
     assert "that is" in result
 
 
+def test_tool_name_pronunciation():
+    # python's "uv" must not be read as the word "oove"
+    assert "you vee" in preprocess_for_tts("run uv sync")
+    assert "you vee x" in preprocess_for_tts("uvx ruff")
+    # case-insensitive
+    assert "you vee" in preprocess_for_tts("UV light")
+
+
+def test_tool_name_word_boundary():
+    # Substrings inside real words must be left alone
+    result = preprocess_for_tts("the Louvre museum")
+    assert "Louvre" in result
+    assert "you vee" not in result
+
+
+def test_known_acronyms_spelled():
+    # Built-in acronyms (PHI, PII, SSN, DOB) are spelled letter-by-letter
+    assert "P H I" in preprocess_for_tts("PHI was exposed")
+    assert "S S N" in preprocess_for_tts("the SSN field")
+
+
+def test_unknown_caps_left_alone():
+    # Non-acronym ALL-CAPS words aren't spelled or title-cased
+    result = preprocess_for_tts("DEPLOYED to production")
+    assert "DEPLOYED" in result
+
+
+def test_custom_acronyms_param():
+    # Caller-supplied acronyms (player passes the configured set) are spelled
+    result = preprocess_for_tts("the API is down", acronyms={"API"})
+    assert "A P I" in result
+    # ... but not when it isn't a known acronym
+    assert "A P I" not in preprocess_for_tts("the API is down", acronyms=set())
+
+
 def test_cleanup():
     # Multiple spaces should be collapsed
     result = preprocess_for_tts("a  →  b")
@@ -120,6 +155,11 @@ if __name__ == "__main__":
         test_version_numbers,
         test_programming_operators,
         test_mixed_content,
+        test_tool_name_pronunciation,
+        test_tool_name_word_boundary,
+        test_known_acronyms_spelled,
+        test_unknown_caps_left_alone,
+        test_custom_acronyms_param,
         test_cleanup,
         test_empty_input,
     ]

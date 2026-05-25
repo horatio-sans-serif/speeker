@@ -150,6 +150,17 @@ ABBREVIATION_PATTERNS = [
     (r"\bFW:\s*", " forwarded "),
 ]
 
+# Technical terms / tool names that TTS engines mispronounce as words.
+# Matched case-insensitively as whole words (so "Louvre" or "value" are untouched).
+# Extend this list as new offenders turn up.
+TERM_PRONUNCIATIONS = [
+    (re.compile(r"\buvx\b", re.IGNORECASE), "you vee x"),
+    (re.compile(r"\buv\b", re.IGNORECASE), "you vee"),  # python's uv, not "oove"
+    (re.compile(r"\bnpx\b", re.IGNORECASE), "n p x"),
+    (re.compile(r"\bjq\b", re.IGNORECASE), "jay queue"),
+    (re.compile(r"\byaml\b", re.IGNORECASE), "yammel"),
+]
+
 # Single letter handling - add slight pause/emphasis
 SINGLE_LETTER_PATTERNS = [
     # Single letters that might get lost - add "letter" for clarity when standalone
@@ -169,14 +180,24 @@ LATE_PATTERNS = [
 ]
 
 
-def preprocess_for_tts(text: str) -> str:
+def preprocess_for_tts(text: str, acronyms: set[str] | None = None) -> str:
     """Preprocess text for better TTS output.
 
-    Converts symbols, abbreviations, and technical notation
-    to spoken equivalents.
+    Converts symbols, abbreviations, and technical notation to spoken
+    equivalents, fixes commonly mispronounced tool names (e.g. "uv" ->
+    "you vee"), and spells out known acronyms letter-by-letter.
+
+    *acronyms* defaults to the built-in set (``COMMON_ACRONYMS``); the player
+    passes that set extended by the configured ``ssml.acronyms_file`` so every
+    playback path -- CLI, HTTP, and MCP -- gets the same acronym handling that
+    previously only applied to SSML text.
     """
     if not text:
         return text
+
+    if acronyms is None:
+        from .ssml import load_acronyms
+        acronyms = load_acronyms()
 
     result = text
 
@@ -191,6 +212,23 @@ def preprocess_for_tts(text: str) -> str:
     # Apply abbreviation patterns
     for pattern, replacement in ABBREVIATION_PATTERNS:
         result = re.sub(pattern, replacement, result, flags=re.IGNORECASE)
+
+    # Fix mispronounced technical terms / tool names (uv, jq, ...)
+    for pattern, spoken in TERM_PRONUNCIATIONS:
+        result = pattern.sub(spoken, result)
+
+    # Spell out known acronyms (ALL-CAPS words in the acronym set) as spaced
+    # letters, e.g. "PHI" -> "P H I", which engines read letter-by-letter.
+    # Unknown ALL-CAPS words are left as-is so common words like "DEPLOYED"
+    # aren't mangled.
+    if acronyms:
+        from .ssml import _CAPS_WORD_RE
+        result = _CAPS_WORD_RE.sub(
+            lambda m: " ".join(m.group(0).upper())
+            if m.group(0).upper() in acronyms
+            else m.group(0),
+            result,
+        )
 
     # Apply single letter patterns
     for pattern, replacement in SINGLE_LETTER_PATTERNS:

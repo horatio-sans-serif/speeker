@@ -233,7 +233,10 @@ def speak_text(
                 eng, text, is_ssml=True, emulate=emulate, acronyms_file=acronyms_file
             )
         else:
-            payload, ssml_for_engine = preprocess_for_tts(text), False
+            from .ssml import load_acronyms
+            acronyms_file = get_ssml_config().get("acronyms_file")
+            payload = preprocess_for_tts(text, acronyms=load_acronyms(acronyms_file))
+            ssml_for_engine = False
 
         audio, sample_rate = eng.generate(
             payload, voice, is_ssml=ssml_for_engine, polly_engine=polly_engine

@@ -247,15 +247,19 @@ def generate_tts(
         voice = voice or eng.default_voice()
         is_ssml = is_ssml or looks_like_ssml(text)
 
+        ssml_cfg = get_ssml_config()
         if is_ssml:
-            ssml_cfg = get_ssml_config()
             payload, ssml_for_engine = prepare_payload(
                 eng, text, is_ssml=True,
                 emulate=ssml_cfg.get("emulate_for_local", False),
                 acronyms_file=ssml_cfg.get("acronyms_file"),
             )
         else:
-            payload, ssml_for_engine = preprocess_for_tts(text), False
+            from .ssml import load_acronyms
+            payload = preprocess_for_tts(
+                text, acronyms=load_acronyms(ssml_cfg.get("acronyms_file"))
+            )
+            ssml_for_engine = False
 
         audio_np, sample_rate = eng.generate(
             payload, voice, is_ssml=ssml_for_engine, polly_engine=polly_engine
