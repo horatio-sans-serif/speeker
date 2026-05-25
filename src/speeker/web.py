@@ -5,6 +5,7 @@ from pathlib import Path
 
 import hashlib
 import json
+import re
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -13,6 +14,17 @@ from .queue_db import get_history, get_settings, set_settings, search
 from .voices import POCKET_TTS_VOICES, KOKORO_VOICES
 
 router = APIRouter()
+
+# $Note tone markers (e.g. "$Eb4") trigger attention tones at playback and are
+# consumed by the player; they must not appear in the displayed transcript.
+# Mirrors player.NOTE_PATTERN; kept local so the server needn't import the
+# player (which pulls in TTS engine deps).
+_TONE_TOKEN_RE = re.compile(r"\$[A-Ga-g][b#]?[0-8]\s*")
+
+
+def strip_tone_tokens(text: str) -> str:
+    """Remove $Note tone markers so they aren't shown in the queue history."""
+    return _TONE_TOKEN_RE.sub("", text or "").strip()
 
 # Simple HTML template
 HTML_TEMPLATE = """
@@ -444,7 +456,7 @@ async def index(q: str | None = None):
             else f'<button class="play-btn" disabled>{play_icon}</button>'
         )
 
-        text_escaped = escape_html(item['text'])
+        text_escaped = escape_html(strip_tone_tokens(item['text']))
 
         # Show score if searching
         score_html = ""
@@ -505,7 +517,7 @@ async def api_items():
         queue = item.get("session_id") or "default"
         result.append({
             "id": item["id"],
-            "text": escape_html(item["text"]),
+            "text": escape_html(strip_tone_tokens(item["text"])),
             "time": format_time(item["created_at"]),
             "played": bool(item["played_at"]),
             "has_audio": has_audio,

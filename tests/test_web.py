@@ -12,7 +12,28 @@ from speeker.web import (
     sanitize_key,
     sanitize_value,
     render_metadata,
+    strip_tone_tokens,
 )
+
+
+class TestStripToneTokens:
+    """Tests for strip_tone_tokens (display-time elision of $Note tones)."""
+
+    def test_strips_leading_tone(self):
+        assert strip_tone_tokens("$Eb4 doctor video. Fixed it.") == "doctor video. Fixed it."
+
+    def test_strips_multiple_leading_tones(self):
+        assert strip_tone_tokens("$Eb3 $Eb3 Title. Body.") == "Title. Body."
+
+    def test_no_tone_unchanged(self):
+        assert strip_tone_tokens("Just a normal sentence.") == "Just a normal sentence."
+
+    def test_does_not_eat_dollar_amounts(self):
+        # "$5" is not a note token and must be preserved.
+        assert strip_tone_tokens("It cost $5 today.") == "It cost $5 today."
+
+    def test_empty(self):
+        assert strip_tone_tokens("") == ""
 
 
 class TestFormatTime:
