@@ -45,11 +45,10 @@ DEFAULT_ENDPOINTS = {
     "openai": "https://api.openai.com",
 }
 
-SUMMARIZE_PROMPT = """Write ONE short sentence (max 15 words) summarizing what was accomplished.
+SUMMARIZE_PROMPT = """Summarize what was accomplished in one or two complete sentences for someone listening hands-free.
 
 Rules:
-- ONE sentence only, no more
-- Max 15 words
+- One or two complete sentences (about 30 words total) — never stop mid-sentence
 - Start with a past-tense action verb (Fixed, Updated, Added, Completed, Resolved, etc.)
 - No file paths, URLs, code, or technical jargon
 - Describe the outcome, not the process
@@ -58,10 +57,10 @@ Rules:
 Text:
 {text}
 
-One-sentence summary:"""
+Summary:"""
 
 
-def summarize_for_speech(text: str, max_words: int = 15) -> str:
+def summarize_for_speech(text: str, max_words: int = 30) -> str:
     """Summarize text for TTS using configured LLM backend.
 
     Args:
@@ -212,7 +211,13 @@ def call_openai(prompt: str) -> str | None:
 
 
 def clean_summary(text: str, max_words: int) -> str:
-    """Clean up LLM response to ensure ONE concise sentence."""
+    """Clean up an LLM response into one or two concise, *complete* sentences.
+
+    The word budget is enforced by dropping whole trailing sentences rather than
+    slicing mid-phrase, so a spoken summary never cuts off abruptly. A single
+    over-long sentence is trimmed only as a last resort, ending on a clause
+    boundary.
+    """
     text = text.strip()
 
     # If there are multiple lines, take the last non-empty one
@@ -247,22 +252,39 @@ def clean_summary(text: str, max_words: int) -> str:
     # Remove leading dashes or bullets
     text = re.sub(r'^[-•*]\s*', '', text)
 
-    # Keep only the FIRST sentence (truncate at first sentence boundary)
-    sentence_match = re.match(r'^[^.!?]+[.!?]', text)
-    if sentence_match:
-        text = sentence_match.group(0)
+    # Keep at most the first two sentences (a complete thought, not a fragment).
+    sentences = re.findall(r'[^.!?]+[.!?]', text)
+    if sentences:
+        text = ' '.join(s.strip() for s in sentences[:2])
 
-    # Enforce word limit
-    words = text.split()
-    if len(words) > max_words:
-        text = ' '.join(words[:max_words])
-        if not text.endswith('.'):
-            text += '.'
+    # Enforce the word budget without chopping mid-sentence: keep whole
+    # sentences while they fit; only hard-trim a lone over-long sentence.
+    if len(text.split()) > max_words:
+        parts = re.findall(r'[^.!?]+[.!?]', text) or [text]
+        kept: list[str] = []
+        count = 0
+        for sentence in parts:
+            sentence = sentence.strip()
+            n = len(sentence.split())
+            if kept and count + n > max_words:
+                break
+            kept.append(sentence)
+            count += n
+        text = ' '.join(kept) if kept else text
+
+        words = text.split()
+        if len(words) > max_words:
+            clipped = ' '.join(words[:max_words])
+            if ',' in clipped:  # prefer to stop at a clause boundary
+                clipped = clipped.rsplit(',', 1)[0]
+            text = clipped.rstrip(' ,;:')
+            if text and text[-1] not in '.!?':
+                text += '.'
 
     return text.strip()
 
 
-def fallback_summarize(text: str, max_words: int = 15) -> str:
+def fallback_summarize(text: str, max_words: int = 30) -> str:
     """Fallback summarization without LLM - extracts key outcome sentence."""
     # Remove code blocks
     text = re.sub(r'```[\s\S]*?```', '', text)

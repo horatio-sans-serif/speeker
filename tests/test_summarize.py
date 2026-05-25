@@ -55,11 +55,25 @@ class TestCleanSummary:
         result = clean_summary("• Fixed the bug.", 15)
         assert result == "Fixed the bug."
 
-    def test_clean_summary_keeps_first_sentence(self):
-        """Test keeps only first sentence."""
+    def test_clean_summary_keeps_up_to_two_sentences(self):
+        """Keeps up to two complete sentences (not just the first)."""
         result = clean_summary("Fixed the bug. Also updated tests.", 15)
-        assert result == "Fixed the bug."
-        assert "Also" not in result
+        assert result == "Fixed the bug. Also updated tests."
+
+    def test_clean_summary_caps_at_two_sentences(self):
+        """Drops a third sentence."""
+        result = clean_summary("Fixed the bug. Updated tests. Wrote docs.", 30)
+        assert result == "Fixed the bug. Updated tests."
+        assert "docs" not in result
+
+    def test_clean_summary_drops_whole_sentence_over_budget(self):
+        """Over budget: drop the trailing sentence rather than slice mid-phrase."""
+        result = clean_summary(
+            "Fixed the login bug. Then refactored the entire authentication subsystem thoroughly.",
+            5,
+        )
+        # First sentence fits; the long second sentence is dropped whole.
+        assert result == "Fixed the login bug."
 
     def test_clean_summary_enforces_word_limit(self):
         """Test enforces maximum word count."""
