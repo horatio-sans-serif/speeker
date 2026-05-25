@@ -99,6 +99,14 @@ def test_tool_name_pronunciation():
     assert "you vee" in preprocess_for_tts("UV light")
 
 
+def test_todo_pronunciation():
+    # "todo" must read as "to do", not "TOTO"
+    assert "to do" in preprocess_for_tts("update the todo list")
+    assert "to dos" in preprocess_for_tts("clear all todos")
+    # not mangled inside other words
+    assert preprocess_for_tts("mikado") == "mikado"
+
+
 def test_tool_name_word_boundary():
     # Substrings inside real words must be left alone
     result = preprocess_for_tts("the Louvre museum")
@@ -156,6 +164,7 @@ if __name__ == "__main__":
         test_programming_operators,
         test_mixed_content,
         test_tool_name_pronunciation,
+        test_todo_pronunciation,
         test_tool_name_word_boundary,
         test_known_acronyms_spelled,
         test_unknown_caps_left_alone,

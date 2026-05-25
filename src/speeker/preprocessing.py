@@ -159,6 +159,8 @@ TERM_PRONUNCIATIONS = [
     (re.compile(r"\bnpx\b", re.IGNORECASE), "n p x"),
     (re.compile(r"\bjq\b", re.IGNORECASE), "jay queue"),
     (re.compile(r"\byaml\b", re.IGNORECASE), "yammel"),
+    (re.compile(r"\btodos\b", re.IGNORECASE), "to dos"),
+    (re.compile(r"\btodo\b", re.IGNORECASE), "to do"),  # not "TOTO"
 ]
 
 # Single letter handling - add slight pause/emphasis
