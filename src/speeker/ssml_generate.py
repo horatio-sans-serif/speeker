@@ -7,7 +7,13 @@ All output is sanitized to the Polly-safe whitelist.
 
 import re
 
-from .ssml import sanitize_ssml, escape_text, load_acronyms, _CAPS_WORD_RE
+from .ssml import (
+    sanitize_ssml,
+    escape_text,
+    load_acronyms,
+    is_well_formed_ssml,
+    _CAPS_WORD_RE,
+)
 
 # Each preset documents itself (used by --help) and drives both the LLM prompt
 # and the rule-based generator.
@@ -164,14 +170,44 @@ def generate_ssml(text: str, purpose: str = "audiobook") -> str:
     backend = _get_llm_settings()[0]
     if backend:
         try:
-            response = call_llm(build_prompt(text, purpose))
-            # Only trust output that actually produced SSML markup; otherwise the
-            # sanitizer would happily escape garbage like "<<<>>>" into text.
+            # 4096 tokens lets the LLM emit ~3000 chars of SSML (Polly's
+            # synchronous limit) plus markup overhead without truncation.
+            # The shared default of 100 in summarize.py is calibrated for
+            # short summaries, not SSML generation.
+            response = call_llm(build_prompt(text, purpose), max_tokens=4096)
+            # Trust LLM output only if it (1) contains a <speak> block,
+            # (2) sanitizes to well-formed XML (so Polly accepts it),
+            # and (3) preserves enough of the input — if the LLM
+            # truncated and emitted only a fraction of the words,
+            # rule_based_ssml will be more complete and the listener
+            # gets the whole chapter.
             if response and "<speak" in response.lower():
                 sanitized = sanitize_ssml(_extract_ssml(response))
-                if _has_content(sanitized):
+                if (
+                    _has_content(sanitized)
+                    and is_well_formed_ssml(sanitized)
+                    and not _looks_truncated(text, sanitized)
+                ):
                     return sanitized
         except Exception:
             pass  # fall through to rule-based
 
     return rule_based_ssml(text, purpose)
+
+
+# If the LLM produced fewer than this fraction of the input's words, treat
+# it as truncated and prefer the deterministic generator (which is verbatim).
+_TRUNCATION_RECOVERY_THRESHOLD = 0.75
+
+
+def _looks_truncated(input_text: str, sanitized_ssml: str) -> bool:
+    """True if the SSML's spoken text covers < threshold of the input's words.
+
+    Catches the common failure where an LLM hits max_tokens mid-document and
+    emits a structurally valid but content-incomplete SSML block."""
+    input_words = len(input_text.split())
+    if input_words == 0:
+        return False
+    spoken = strip_ssml(sanitized_ssml)
+    spoken_words = len(spoken.split())
+    return spoken_words < _TRUNCATION_RECOVERY_THRESHOLD * input_words

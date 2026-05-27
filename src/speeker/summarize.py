@@ -93,19 +93,22 @@ def summarize_for_speech(text: str, max_words: int = 30) -> str:
     return fallback_summarize(text, max_words)
 
 
-def call_llm(prompt: str) -> str | None:
-    """Call the configured LLM backend."""
+def call_llm(prompt: str, max_tokens: int = 100) -> str | None:
+    """Call the configured LLM backend. *max_tokens* defaults to 100 for
+    short-summary callers; longer-form callers (e.g. SSML generation
+    where the output must include both markup and the full input text)
+    should pass a larger value, typically 4000+."""
     llm_backend, _, _, _ = _get_llm_settings()
     if llm_backend == "ollama":
-        return call_ollama(prompt)
+        return call_ollama(prompt, max_tokens=max_tokens)
     elif llm_backend == "anthropic":
-        return call_anthropic(prompt)
+        return call_anthropic(prompt, max_tokens=max_tokens)
     elif llm_backend == "openai":
-        return call_openai(prompt)
+        return call_openai(prompt, max_tokens=max_tokens)
     return None
 
 
-def call_ollama(prompt: str) -> str | None:
+def call_ollama(prompt: str, max_tokens: int = 100) -> str | None:
     """Call Ollama API."""
     _, llm_endpoint, _, llm_model = _get_llm_settings()
     endpoint = llm_endpoint or DEFAULT_ENDPOINTS["ollama"]
@@ -117,7 +120,7 @@ def call_ollama(prompt: str) -> str | None:
         "stream": False,
         "options": {
             "temperature": 0.3,
-            "num_predict": 100,
+            "num_predict": max_tokens,
         }
     }).encode('utf-8')
 
@@ -136,7 +139,7 @@ def call_ollama(prompt: str) -> str | None:
         return None
 
 
-def call_anthropic(prompt: str) -> str | None:
+def call_anthropic(prompt: str, max_tokens: int = 100) -> str | None:
     """Call Anthropic API."""
     _, llm_endpoint, llm_api_key, llm_model = _get_llm_settings()
     if not llm_api_key:
@@ -147,7 +150,7 @@ def call_anthropic(prompt: str) -> str | None:
 
     data = json.dumps({
         "model": model,
-        "max_tokens": 100,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }).encode('utf-8')
 
@@ -173,7 +176,7 @@ def call_anthropic(prompt: str) -> str | None:
         return None
 
 
-def call_openai(prompt: str) -> str | None:
+def call_openai(prompt: str, max_tokens: int = 100) -> str | None:
     """Call OpenAI-compatible API."""
     _, llm_endpoint, llm_api_key, llm_model = _get_llm_settings()
     if not llm_api_key:
@@ -184,7 +187,7 @@ def call_openai(prompt: str) -> str | None:
 
     data = json.dumps({
         "model": model,
-        "max_tokens": 100,
+        "max_tokens": max_tokens,
         "temperature": 0.3,
         "messages": [{"role": "user", "content": prompt}],
     }).encode('utf-8')

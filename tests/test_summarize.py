@@ -308,32 +308,42 @@ class TestCallLlm:
     @patch("speeker.summarize._get_llm_settings")
     @patch("speeker.summarize.call_ollama")
     def test_call_llm_ollama(self, mock_call, mock_settings):
-        """Test calls ollama backend."""
+        """Test calls ollama backend, default max_tokens=100."""
         mock_settings.return_value = ("ollama", "", "", "")
         mock_call.return_value = "Summary"
         result = call_llm("prompt")
-        mock_call.assert_called_once_with("prompt")
+        mock_call.assert_called_once_with("prompt", max_tokens=100)
         assert result == "Summary"
 
     @patch("speeker.summarize._get_llm_settings")
     @patch("speeker.summarize.call_anthropic")
     def test_call_llm_anthropic(self, mock_call, mock_settings):
-        """Test calls anthropic backend."""
+        """Test calls anthropic backend, default max_tokens=100."""
         mock_settings.return_value = ("anthropic", "", "key", "")
         mock_call.return_value = "Summary"
         result = call_llm("prompt")
-        mock_call.assert_called_once_with("prompt")
+        mock_call.assert_called_once_with("prompt", max_tokens=100)
         assert result == "Summary"
 
     @patch("speeker.summarize._get_llm_settings")
     @patch("speeker.summarize.call_openai")
     def test_call_llm_openai(self, mock_call, mock_settings):
-        """Test calls openai backend."""
+        """Test calls openai backend, default max_tokens=100."""
         mock_settings.return_value = ("openai", "", "key", "")
         mock_call.return_value = "Summary"
         result = call_llm("prompt")
-        mock_call.assert_called_once_with("prompt")
+        mock_call.assert_called_once_with("prompt", max_tokens=100)
         assert result == "Summary"
+
+    @patch("speeker.summarize._get_llm_settings")
+    @patch("speeker.summarize.call_ollama")
+    def test_call_llm_passes_max_tokens(self, mock_call, mock_settings):
+        """Test call_llm forwards max_tokens to the backend (e.g. for SSML
+        generation which needs ~4000 tokens, not the summarize default)."""
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = "..."
+        call_llm("prompt", max_tokens=4096)
+        mock_call.assert_called_once_with("prompt", max_tokens=4096)
 
     @patch("speeker.summarize._get_llm_settings")
     def test_call_llm_unknown_backend_returns_none(self, mock_settings):

@@ -167,11 +167,16 @@ class PollyEngine(BaseEngine):
 
     def generate(self, text, voice, *, is_ssml=False, **options):
         from .config import get_polly_config
-        from .ssml import ensure_speak_wrapped
+        from .ssml import ensure_speak_wrapped, sanitize_ssml
         cfg = get_polly_config()
         variant = options.get("polly_engine") or cfg.get("engine") or "neural"
         if is_ssml:
-            payload, text_type = ensure_speak_wrapped(text), "ssml"
+            # Run the engine-aware sanitizer last so any LLM-emitted features
+            # that the selected variant doesn't support (e.g. <emphasis> on
+            # neural) are stripped before the API call. Without this, Polly
+            # raises "Unsupported Neural feature" and the whole chapter fails.
+            payload = sanitize_ssml(ensure_speak_wrapped(text), polly_engine=variant)
+            text_type = "ssml"
         else:
             payload, text_type = text, "text"
         resp = self._get_client().synthesize_speech(

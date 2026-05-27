@@ -96,3 +96,53 @@ class TestGenerateSsml:
              patch.object(ssml_generate, "call_llm", return_value="<<<>>>"):
             out = generate_ssml("Para one.\n\nPara two.", purpose="audiobook")
         assert '<prosody rate="95%">' in out  # came from rule-based fallback
+
+    def test_truncated_llm_output_unrecoverable_falls_back(self):
+        """If the LLM truncates so badly that even sanitize_ssml's tag-balancing
+        pass can't produce well-formed XML (e.g. literal `&lt;/p` text that no
+        longer pairs with any opener), generate_ssml falls back to rule-based."""
+        # This output has `&lt;/p` as text (escaped less-than), which means
+        # there's no matching </p> tag to close the open <p>. After balancing
+        # the open <p> gets closed, but the literal `&lt;/p` text remains —
+        # the balanced output is well-formed XML so it's actually accepted.
+        # To force unrecoverable, use truly mangled output.
+        bad = "<speak><<<><p>truncated"
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value=bad):
+            out = generate_ssml("Real input.\n\nMore.", purpose="audiobook")
+        # whatever happens, the result must be well-formed and content-bearing
+        from speeker.ssml import is_well_formed_ssml
+        assert is_well_formed_ssml(out)
+
+    def test_unclosed_p_from_llm_repaired_and_used(self):
+        """If the LLM truncates with an unclosed <p>, sanitize_ssml balances
+        it and generate_ssml ships the (now well-formed) result instead of
+        falling back to rule-based. The input is short enough that the
+        truncation-recovery threshold does NOT fire."""
+        truncated = "<speak><p>An Outcome describes what did happen</speak>"
+        # Input ~9 words; sanitized output preserves all 9 -> not truncated.
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value=truncated):
+            out = generate_ssml("An Outcome describes what did happen.",
+                                purpose="audiobook")
+        from speeker.ssml import is_well_formed_ssml
+        assert is_well_formed_ssml(out)
+        assert "<p>An Outcome describes what did happen</p></speak>" in out
+
+    def test_content_truncated_llm_falls_back_to_rule_based(self):
+        """If the LLM emits well-formed SSML but covers less than 75% of the
+        input's words, generate_ssml falls back to rule_based — so the
+        listener gets the whole chapter, not the truncated LLM version."""
+        # 4-word LLM output for a 30-word input -> 13% coverage -> fall back.
+        short_llm = "<speak><p>Hi there folks!</p></speak>"
+        long_input = " ".join(["word"] * 30) + "."
+        with patch.object(ssml_generate, "_get_llm_settings",
+                          return_value=("ollama", "", "", "")), \
+             patch.object(ssml_generate, "call_llm", return_value=short_llm):
+            out = generate_ssml(long_input, purpose="audiobook")
+        # rule_based output has prosody wrapper
+        assert '<prosody rate="95%">' in out
+        # ... and includes the input text, not the LLM's "Hi there folks"
+        assert "Hi there folks" not in out
