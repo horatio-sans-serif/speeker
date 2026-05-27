@@ -36,6 +36,28 @@ class TestSpeakTool:
         assert data["metadata"]["polly_engine"] == "long-form"
         assert data["metadata"]["queue"] == "q1"
 
+    def test_interpretation_flows_into_metadata(self):
+        captured = {}
+
+        def fake_call(endpoint, data):
+            captured["data"] = data
+            return {"status": "success", "queue_id": 1, "pending_count": 1}
+
+        with patch.object(mcp_server, "call_speeker", side_effect=fake_call):
+            mcp_server.speak("Build passed", interpretation="SUCCESS", queue="q1")
+        assert captured["data"]["metadata"]["interpretation"] == "SUCCESS"
+
+    def test_interpretation_omitted_when_not_given(self):
+        captured = {}
+
+        def fake_call(endpoint, data):
+            captured["data"] = data
+            return {"status": "success", "queue_id": 1, "pending_count": 1}
+
+        with patch.object(mcp_server, "call_speeker", side_effect=fake_call):
+            mcp_server.speak("Just talking", queue="q1")
+        assert "interpretation" not in captured["data"]["metadata"]
+
 
 class TestGenerateSsmlTool:
     def test_posts_to_ssml(self):

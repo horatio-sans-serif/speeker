@@ -29,6 +29,34 @@ DEFAULT_CONFIG = {
         "emulate_for_local": False,  # if True, approximate SSML for local TTS engines
         "acronyms_file": None,       # path to a file of extra spell-out acronyms
     },
+    "interpretations": {
+        # Pause (seconds) after a cue finishes, before the utterance speaks.
+        "pause_after_seconds": 0.3,
+        # Map an interpretation name to an indication. An indication is either
+        #   {"type": "notes", "notes": [{"pitch": "Eb3", "seconds": 0.15}, ...]}
+        # or
+        #   {"type": "sound_file", "path": "/abs/path/to/cue.wav"}
+        # SUCCESS/ERROR are also built in (see interpretations.py); entries here
+        # override the built-ins of the same name.
+        "map": {
+            "SUCCESS": {
+                "type": "notes",
+                "notes": [
+                    {"pitch": "Eb3", "seconds": 0.15},
+                    {"pitch": "G#3", "seconds": 0.9},
+                ],
+            },
+            "ERROR": {
+                "type": "notes",
+                "notes": [
+                    {"pitch": "Eb4", "seconds": 0.3},
+                    {"pitch": "D4", "seconds": 0.2},
+                    {"pitch": "Bb2", "seconds": 0.2},
+                    {"pitch": "Bb2", "seconds": 0.2},
+                ],
+            },
+        },
+    },
 }
 
 
@@ -118,3 +146,9 @@ def get_ssml_config() -> dict:
     """Get SSML configuration."""
     config = get_config()
     return config.get("ssml", {})
+
+
+def get_interpretations_config() -> dict:
+    """Get interpretation cue configuration."""
+    config = get_config()
+    return config.get("interpretations", {})

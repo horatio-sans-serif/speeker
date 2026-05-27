@@ -216,11 +216,48 @@ def speak_text(
     is_ssml: bool = False,
     polly_engine: str | None = None,
     emulate: bool | None = None,
+    interpretation: str | None = None,
 ) -> bool:
-    """Generate and optionally queue speech for a piece of text. Returns True on success."""
+    """Generate or queue speech for a piece of text. Returns True on success.
+
+    Default mode enqueues the text for the player daemon, which is the single
+    owner of audio output: it generates the TTS and plays any interpretation
+    cue before the speech. This is the same path the HTTP server uses, so the
+    daemon's preprocessing (acronyms, SSML handling) applies identically.
+
+    --stdout and --no-play generate audio synchronously here instead, since
+    they need the bytes/file immediately and never reach the speakers; an
+    interpretation has no effect in those modes."""
     if not text or not text.strip():
         return True  # Empty text is not an error
 
+    # Default path: hand off to the daemon via the shared SQLite queue.
+    if not stdout and not no_play:
+        from .queue_db import enqueue
+
+        metadata: dict = {}
+        if engine:
+            metadata["engine"] = engine
+        if voice:
+            metadata["voice"] = voice
+        if polly_engine:
+            metadata["polly_engine"] = polly_engine
+        if is_ssml or looks_like_ssml(text):
+            metadata["ssml"] = True
+        if interpretation:
+            metadata["interpretation"] = interpretation
+
+        try:
+            queue_id = enqueue(text, metadata=metadata or None)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return False
+        start_player()
+        if not quiet:
+            print(f"Queued (id={queue_id})", file=sys.stderr)
+        return True
+
+    # Synchronous generation for --stdout / --no-play.
     ssml_requested = is_ssml or looks_like_ssml(text)
 
     try:
@@ -246,14 +283,9 @@ def speak_text(
             audio_normalized = np.clip(audio, -1.0, 1.0)
             audio_int16 = (audio_normalized * 32767).astype(np.int16)
             wavfile.write(sys.stdout.buffer, sample_rate, audio_int16)
-        elif no_play:
+        else:  # no_play
             audio_path = save_audio(audio, sample_rate, text)
             print(audio_path)
-        else:
-            audio_path = save_audio(audio, sample_rate, text)
-            queue_for_playback(audio_path)
-            if not quiet:
-                print(f"Queued: {audio_path}", file=sys.stderr)
         return True
 
     except Exception as e:
@@ -291,6 +323,17 @@ def _apply_aws_profile(args: argparse.Namespace) -> None:
     """Set AWS_PROFILE from --aws-profile so boto3 (Polly) picks it up."""
     if getattr(args, "aws_profile", None):
         os.environ["AWS_PROFILE"] = args.aws_profile
+
+
+def _validate_interpretation(name: str) -> bool:
+    """Print an error to stderr and return False if the interpretation is unknown."""
+    from .interpretations import interpretation_names, is_valid_interpretation
+
+    if not is_valid_interpretation(name):
+        print(f"Error: Unknown interpretation '{name}'.", file=sys.stderr)
+        print(f"Known interpretations: {', '.join(interpretation_names())}", file=sys.stderr)
+        return False
+    return True
 
 
 # Sentence boundary pattern: ends with .!? followed by space, newline, or end of string
@@ -359,7 +402,8 @@ def cmd_speak_stream(args: argparse.Namespace) -> int:
             sentence, engine, voice, args.no_play, args.quiet, args.stdout,
             is_ssml=args.ssml, polly_engine=getattr(args, "polly_engine", None),
             emulate=args.emulate_ssml,
-        ):
+        ):  # interpretation intentionally omitted: a per-sentence cue would
+            # repeat on every streamed sentence.
             error_count += 1
         else:
             sentence_count += 1
@@ -391,13 +435,17 @@ def cmd_speak(args: argparse.Namespace) -> int:
     if not _validate_engine_and_voice(engine, voice):
         return 1
 
+    interpretation = getattr(args, "interpretation", None)
+    if interpretation and not _validate_interpretation(interpretation):
+        return 1
+
     if not args.quiet:
         print(f"Generating speech with {engine}/{voice}...", file=sys.stderr)
 
     if not speak_text(
         text, engine, voice, args.no_play, args.quiet, args.stdout,
         is_ssml=args.ssml, polly_engine=getattr(args, "polly_engine", None),
-        emulate=args.emulate_ssml,
+        emulate=args.emulate_ssml, interpretation=interpretation,
     ):
         return 1
     return 0
@@ -439,16 +487,14 @@ def cmd_play(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Handle the status command."""
     audio = _audio_dir()
-    queue_file = get_queue_file()
 
     print(f"Data directory: {data_dir()}")
     print(f"Player running: {'yes' if is_player_running() else 'no'}")
 
-    if queue_file.exists():
-        with open(queue_file) as f:
-            lines = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-        print(f"Queue length: {len(lines)}")
-    else:
+    try:
+        from .queue_db import get_pending_count
+        print(f"Queue length: {get_pending_count()}")
+    except Exception:
         print("Queue length: 0")
 
     # Count audio files
@@ -617,6 +663,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--aws-profile",
         help="AWS profile for Polly (sets AWS_PROFILE; overrides the default "
              "credential chain). Equivalent to exporting AWS_PROFILE.",
+    )
+    speak_parser.add_argument(
+        "--interpretation",
+        help="Outcome cue to play before the speech: SUCCESS, ERROR, or a "
+             "custom name from the interpretations config. Ignored with "
+             "--stdout/--no-play (no playback occurs in those modes).",
     )
     speak_parser.set_defaults(func=cmd_speak)
 

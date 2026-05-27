@@ -76,6 +76,7 @@ def speak(
     ssml: bool = False,
     polly_engine: str | None = None,
     polly_voice: str | None = None,
+    interpretation: str | None = None,
 ) -> dict[str, Any]:
     """
     Generate speech from text and queue for playback.
@@ -88,6 +89,10 @@ def speak(
         ssml: Treat text as SSML (native on Polly; emulated/stripped on local engines)
         polly_engine: Polly variant: "standard", "neural", "long-form", "generative"
         polly_voice: Polly VoiceId (overrides voice when engine="polly")
+        interpretation: Outcome cue to play before the speech. Use "SUCCESS"
+            when a task completed successfully or "ERROR" when it failed; any
+            custom name configured in the server's interpretations map is also
+            accepted. Unknown names are rejected.
 
     Returns:
         Dictionary with status, queue_id, and pending_count
@@ -104,6 +109,8 @@ def speak(
         metadata["voice"] = chosen_voice
     if polly_engine:
         metadata["polly_engine"] = polly_engine
+    if interpretation:
+        metadata["interpretation"] = interpretation
     data["metadata"] = metadata
     if ssml:
         data["ssml"] = True

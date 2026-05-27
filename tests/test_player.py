@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pytest
 
+from speeker.config import save_config
 from speeker.player import (
     parse_note_token,
     extract_tone_tokens,
@@ -13,6 +14,8 @@ from speeker.player import (
     get_intro_sound,
     get_outro_sound,
     play_audio,
+    play_interpretation_cue,
+    render_interpretation_cue,
     should_announce_intro,
     build_session_script,
     unload_tts_model,
@@ -21,6 +24,50 @@ from speeker.player import (
     PAUSE_BETWEEN_MESSAGES,
     PAUSE_BETWEEN_SESSIONS,
 )
+
+
+class TestInterpretationCues:
+    """Tests for interpretation cue rendering and playback."""
+
+    def test_render_unknown_returns_none(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            assert render_interpretation_cue("NOPE") is None
+
+    def test_render_sound_file_returns_path_when_present(self, tmp_path):
+        snd = tmp_path / "ding.wav"
+        snd.write_bytes(b"RIFF....")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "interpretations": {
+                    "map": {"DING": {"type": "sound_file", "path": str(snd)}}
+                }
+            })
+            assert render_interpretation_cue("DING") == snd
+
+    def test_render_sound_file_missing_returns_none(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "interpretations": {
+                    "map": {"DING": {"type": "sound_file", "path": str(tmp_path / "nope.wav")}}
+                }
+            })
+            assert render_interpretation_cue("DING") is None
+
+    @patch("speeker.player.time.sleep")
+    @patch("speeker.player.play_audio")
+    @patch("speeker.player.render_interpretation_cue")
+    def test_play_cue_plays_then_pauses(self, mock_render, mock_play, mock_sleep, tmp_path):
+        mock_render.return_value = Path("/tmp/cue.wav")
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            play_interpretation_cue("SUCCESS")
+        mock_play.assert_called_once_with(Path("/tmp/cue.wav"), False)
+        mock_sleep.assert_called_once()
+
+    @patch("speeker.player.play_audio")
+    @patch("speeker.player.render_interpretation_cue", return_value=None)
+    def test_play_cue_noop_when_unresolved(self, mock_render, mock_play):
+        play_interpretation_cue("NOPE")
+        mock_play.assert_not_called()
 
 
 class _PlayerRecordingEngine:

@@ -416,6 +416,38 @@ class TestSpeakEndpoint:
     @patch("speeker.server.start_player")
     @patch("speeker.server.get_pending_count")
     @patch("speeker.server.enqueue")
+    def test_speak_interpretation_field_flows_into_metadata(
+        self, mock_enqueue, mock_count, mock_player, client, tmp_path
+    ):
+        """A top-level interpretation field is forwarded as queue metadata."""
+        mock_enqueue.return_value = 1
+        mock_count.return_value = 1
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.post(
+                "/speak", json={"text": "Build passed", "interpretation": "SUCCESS"}
+            )
+        assert response.status_code == 200
+        call_args = mock_enqueue.call_args
+        assert call_args[1]["metadata"]["interpretation"] == "SUCCESS"
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    def test_speak_unknown_interpretation_returns_400(
+        self, mock_enqueue, mock_count, mock_player, client, tmp_path
+    ):
+        """An unknown interpretation is rejected before enqueuing."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.post(
+                "/speak", json={"text": "x", "interpretation": "BOGUS"}
+            )
+        assert response.status_code == 400
+        assert "BOGUS" in response.json()["detail"]
+        mock_enqueue.assert_not_called()
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
     def test_speak_with_title(self, mock_enqueue, mock_count, mock_player, client):
         """Test speak with title adds prefix."""
         mock_enqueue.return_value = 1

@@ -222,18 +222,39 @@ class TestQueueForPlayback:
 class TestSpeakText:
     """Tests for speak_text function."""
 
-    @patch("speeker.cli.queue_for_playback")
-    @patch("speeker.cli.save_audio")
-    def test_speak_text_success(self, mock_save, mock_queue):
-        """Test speak_text generates and queues audio."""
-        rec = _RecordingEngine()
-        mock_save.return_value = Path("/tmp/test.wav")
-        with patch("speeker.cli.get_engine", return_value=rec):
-            result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_speak_text_default_enqueues(self, mock_enqueue, mock_player):
+        """Default mode enqueues text + metadata for the daemon and starts it."""
+        mock_enqueue.return_value = 7
+        result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
         assert result is True
-        assert len(rec.calls) == 1
-        mock_save.assert_called_once()
-        mock_queue.assert_called_once()
+        mock_enqueue.assert_called_once()
+        text_arg = mock_enqueue.call_args[0][0]
+        metadata = mock_enqueue.call_args[1]["metadata"]
+        assert text_arg == "Hello"
+        assert metadata["engine"] == "pocket-tts"
+        assert metadata["voice"] == "azelma"
+        mock_player.assert_called_once()
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_speak_text_passes_interpretation(self, mock_enqueue, mock_player):
+        """An interpretation rides along in the queue metadata."""
+        mock_enqueue.return_value = 1
+        speak_text(
+            "Build passed", "pocket-tts", "azelma", False, True, False,
+            interpretation="SUCCESS",
+        )
+        assert mock_enqueue.call_args[1]["metadata"]["interpretation"] == "SUCCESS"
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_speak_text_no_interpretation_key_when_absent(self, mock_enqueue, mock_player):
+        """No interpretation key is added when none is requested."""
+        mock_enqueue.return_value = 1
+        speak_text("Hello", "pocket-tts", "azelma", False, True, False)
+        assert "interpretation" not in mock_enqueue.call_args[1]["metadata"]
 
     def test_speak_text_empty_text(self):
         """Test speak_text returns True for empty text."""
@@ -247,20 +268,30 @@ class TestSpeakText:
 
     @patch("speeker.cli.save_audio")
     def test_speak_text_no_play(self, mock_save, capsys):
-        """Test speak_text with no_play prints path."""
+        """Test speak_text with no_play generates synchronously and prints path."""
         rec = _RecordingEngine()
         mock_save.return_value = Path("/tmp/test.wav")
         with patch("speeker.cli.get_engine", return_value=rec):
             result = speak_text("Hello", "pocket-tts", "azelma", True, False, False)
         assert result is True
+        assert len(rec.calls) == 1
         assert "/tmp/test.wav" in capsys.readouterr().out
 
-    def test_speak_text_handles_error(self, capsys):
-        """Test speak_text handles generation error."""
+    def test_speak_text_no_play_handles_error(self, capsys):
+        """Synchronous (--no-play) generation errors are caught and reported."""
         rec = _RecordingEngine()
         rec.generate = MagicMock(side_effect=Exception("TTS failed"))
         with patch("speeker.cli.get_engine", return_value=rec):
-            result = speak_text("Hello", "pocket-tts", "azelma", False, False, False)
+            result = speak_text("Hello", "pocket-tts", "azelma", True, False, False)
+        assert result is False
+        assert "Error" in capsys.readouterr().err
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_speak_text_enqueue_error_is_handled(self, mock_enqueue, mock_player, capsys):
+        """A failure to enqueue is reported and returns False."""
+        mock_enqueue.side_effect = Exception("db locked")
+        result = speak_text("Hello", "pocket-tts", "azelma", False, True, False)
         assert result is False
         assert "Error" in capsys.readouterr().err
 
@@ -367,14 +398,14 @@ class TestCmdPlay:
 class TestCmdStatus:
     """Tests for cmd_status command."""
 
+    @patch("speeker.queue_db.get_pending_count")
     @patch("speeker.cli.is_player_running")
-    @patch("speeker.cli.get_queue_file")
-    def test_cmd_status_shows_info(self, mock_queue, mock_running, tmp_path, capsys):
+    def test_cmd_status_shows_info(self, mock_running, mock_pending, tmp_path, capsys):
         """Test cmd_status shows status information."""
         from speeker.cli import cmd_status
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            mock_queue.return_value = tmp_path / "queue"
+            mock_pending.return_value = 0
             mock_running.return_value = False
             args = MagicMock()
 
@@ -386,16 +417,14 @@ class TestCmdStatus:
             assert "Player running: no" in captured.out
             assert "Queue length:" in captured.out
 
+    @patch("speeker.queue_db.get_pending_count")
     @patch("speeker.cli.is_player_running")
-    @patch("speeker.cli.get_queue_file")
-    def test_cmd_status_with_queue_items(self, mock_queue, mock_running, tmp_path, capsys):
-        """Test cmd_status shows queue items."""
+    def test_cmd_status_with_queue_items(self, mock_running, mock_pending, tmp_path, capsys):
+        """Test cmd_status reports the SQLite pending count."""
         from speeker.cli import cmd_status
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            queue_file = tmp_path / "queue"
-            queue_file.write_text("/path/to/audio1.wav\n/path/to/audio2.wav\n")
-            mock_queue.return_value = queue_file
+            mock_pending.return_value = 2
             mock_running.return_value = True
             args = MagicMock()
 
@@ -406,14 +435,14 @@ class TestCmdStatus:
             assert "Queue length: 2" in captured.out
             assert "Player running: yes" in captured.out
 
+    @patch("speeker.queue_db.get_pending_count")
     @patch("speeker.cli.is_player_running")
-    @patch("speeker.cli.get_queue_file")
-    def test_cmd_status_counts_audio_files(self, mock_queue, mock_running, tmp_path, capsys):
+    def test_cmd_status_counts_audio_files(self, mock_running, mock_pending, tmp_path, capsys):
         """Test cmd_status counts audio files."""
         from speeker.cli import cmd_status
 
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
-            mock_queue.return_value = tmp_path / "queue"
+            mock_pending.return_value = 0
             mock_running.return_value = False
 
             # audio_dir() returns SPEEKER_DIR/data/audio
@@ -454,6 +483,7 @@ class TestCmdSpeak:
         args.ssml = False
         args.emulate_ssml = False
         args.aws_profile = None
+        args.interpretation = None
 
         result = cmd_speak(args)
 
@@ -481,6 +511,7 @@ class TestCmdSpeak:
         args.ssml = False
         args.emulate_ssml = False
         args.aws_profile = None
+        args.interpretation = None
 
         result = cmd_speak(args)
 

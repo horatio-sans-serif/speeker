@@ -74,6 +74,7 @@ class SpeakRequest(BaseModel):
     text: str
     metadata: dict | None = None
     ssml: bool = False
+    interpretation: str | None = None  # Outcome cue: SUCCESS, ERROR, or custom
     session_id: str | None = None  # Deprecated
 
 
@@ -171,6 +172,22 @@ async def speak(body: SpeakRequest, request: Request):
         if body.session_id and "queue" not in metadata:
             metadata["queue"] = body.session_id
 
+        # Outcome cue: accept a top-level field or metadata["interpretation"].
+        # Validate up front so callers (MCP, hooks) get immediate feedback on a
+        # bad name instead of a silently dropped cue at playback time.
+        if body.interpretation and "interpretation" not in metadata:
+            metadata["interpretation"] = body.interpretation
+        if metadata.get("interpretation"):
+            from .interpretations import interpretation_names, is_valid_interpretation
+            if not is_valid_interpretation(metadata["interpretation"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Unknown interpretation '{metadata['interpretation']}'. "
+                        f"Known: {', '.join(interpretation_names())}"
+                    ),
+                )
+
         # Compute ssml flag before format_with_title so we can skip the title
         # prefix when input is SSML (prepending text before <speak> is invalid).
         ssml = body.ssml or request.query_params.get("ssml", "").lower() == "true"
@@ -196,6 +213,10 @@ async def speak(body: SpeakRequest, request: Request):
             pending_count=get_pending_count(),
         )
 
+    except HTTPException:
+        # Validation errors (e.g. unknown interpretation) carry their own
+        # status code and must not be flattened into a 200 error response.
+        raise
     except Exception as e:
         return SpeakResponse(
             status="error",

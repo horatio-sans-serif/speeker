@@ -51,6 +51,7 @@ ANNOUNCE_THRESHOLD_MINUTES = 30
 _intro_sound_path: Path | None = None
 _outro_sound_path: Path | None = None
 _tone_cache: dict[str, Path] = {}
+_interpretation_cue_cache: dict[str, Path] = {}
 
 # Musical note parsing for tone tokens
 NOTE_PATTERN = re.compile(r"^\s*\$([A-Ga-g])([b#]?)([0-8])")
@@ -332,6 +333,90 @@ def play_tone_tokens(tokens: list[str], verbose: bool = False) -> None:
     play_audio(tone_path, verbose)
 
 
+def synthesize_note_cue(name: str, spec: list[tuple[str, int, float]]) -> Path | None:
+    """Synthesize a note cue with per-note durations into a cached WAV.
+
+    Unlike generate_combined_tones_from_tokens, each note carries its own
+    duration in seconds, so a cue can mix short notes with a ringing one. The
+    cache key includes a hash of the spec, so editing the config regenerates
+    the file."""
+    if not spec:
+        return None
+
+    import hashlib
+
+    from tones import SINE_WAVE
+    from tones.mixer import Mixer
+
+    digest = hashlib.md5(repr(spec).encode()).hexdigest()[:10]
+    cache_key = f"{name}_{digest}"
+    cached = _interpretation_cue_cache.get(cache_key)
+    if cached and cached.exists():
+        return cached
+
+    tone_dir = ensure_dir(_tones_dir())
+    cue_path = tone_dir / f"cue_{cache_key}.wav"
+    if cue_path.exists():
+        _interpretation_cue_cache[cache_key] = cue_path
+        return cue_path
+
+    mixer = Mixer(44100, 0.5)
+    mixer.create_track(0, SINE_WAVE, vibrato_frequency=5.5, vibrato_variance=0.02,
+                       attack=0.01, decay=0.3)
+    for note, octave, seconds in spec:
+        mixer.add_note(0, note=note, octave=octave, duration=seconds)
+
+    mixer.write_wav(str(cue_path))
+    _interpretation_cue_cache[cache_key] = cue_path
+    return cue_path
+
+
+def render_interpretation_cue(name: str, verbose: bool = False) -> Path | None:
+    """Resolve an interpretation name to a playable cue path, or None.
+
+    Unknown names, unsupported indication types, and missing sound files all
+    return None (with a warning) so a misconfigured cue never aborts playback."""
+    from .interpretations import notes_to_spec, resolve_interpretation
+
+    indication = resolve_interpretation(name)
+    if indication is None:
+        if verbose:
+            print(f"[WARN] Unknown interpretation '{name}', skipping cue", file=sys.stderr)
+        return None
+
+    kind = indication.get("type")
+    if kind == "notes":
+        return synthesize_note_cue(name, notes_to_spec(indication))
+    if kind == "sound_file":
+        path = Path(os.path.expanduser(str(indication.get("path", "")))).expanduser()
+        if path.exists():
+            return path
+        if verbose:
+            print(f"[WARN] Sound file for '{name}' not found: {path}", file=sys.stderr)
+        return None
+
+    if verbose:
+        print(f"[WARN] Unknown indication type '{kind}' for '{name}'", file=sys.stderr)
+    return None
+
+
+def play_interpretation_cue(name: str, verbose: bool = False) -> None:
+    """Render and play an interpretation cue, then pause. No-op if unresolved.
+
+    The cue blocks until it finishes (play_audio waits on the player), then we
+    pause before the utterance — matching the 'play and wait, then continue'
+    behavior for both note cues and sound files."""
+    from .interpretations import pause_after_seconds
+
+    cue = render_interpretation_cue(name, verbose)
+    if cue is None:
+        return
+    if verbose:
+        print(f"[CUE] {name}: {cue}", file=sys.stderr)
+    play_audio(cue, verbose)
+    time.sleep(pause_after_seconds())
+
+
 def speak_text(
     text: str,
     voice: str | None = None,
@@ -489,6 +574,7 @@ def process_queue(verbose: bool = False) -> int:
             line_voice = settings["voice"]
             line_polly_engine = None
             line_is_ssml = False
+            line_interpretation = None
             if 0 <= item_idx < len(items):
                 item = items[item_idx]
                 save_path = get_audio_save_path(item["id"])
@@ -496,11 +582,17 @@ def process_queue(verbose: bool = False) -> int:
                 line_engine = meta.get("engine") or settings["engine"]
                 line_voice = meta.get("voice") or settings["voice"]
                 line_polly_engine = meta.get("polly_engine")
+                line_interpretation = meta.get("interpretation")
                 line_is_ssml = bool(meta.get("ssml")) or looks_like_ssml(item["text"])
                 if line_is_ssml:
                     # SSML must be spoken verbatim: a spoken prefix like "First: "
                     # would sit outside the <speak> root and corrupt the markup.
                     line = item["text"]
+
+            # An interpretation cue plays before the item's speech (and after
+            # any queue header line), then a short pause, then the utterance.
+            if line_interpretation:
+                play_interpretation_cue(line_interpretation, verbose)
 
             result = speak_text(
                 line, voice=line_voice, speed=speed, save_path=save_path, verbose=verbose,

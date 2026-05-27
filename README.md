@@ -159,6 +159,33 @@ curl -X POST http://127.0.0.1:7849/speak \
 
 Note format: `$[A-G][b/#]?[0-8]` (e.g., `$C4`, `$Eb3`, `$F#5`)
 
+## Interpretations (outcome cues)
+
+An _interpretation_ tags an utterance with an outcome — `SUCCESS`, `ERROR`, or
+any custom name — and plays a short cue before the speech. The cue is either a
+sequence of notes or a sound file, configured in the `interpretations` map.
+Two are built in:
+
+- `SUCCESS` — a quick Eb3 stepping up to a ringing G#3.
+- `ERROR` — Eb4, D4, then a doubled low Bb2.
+
+```bash
+# CLI
+speeker speak --interpretation SUCCESS "All tests passed"
+speeker speak --interpretation ERROR "Build failed: 3 errors"
+
+# HTTP (top-level field or metadata)
+curl -X POST http://127.0.0.1:7849/speak \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Deploy complete", "interpretation": "SUCCESS"}'
+```
+
+From the MCP `speak` tool, pass `interpretation="SUCCESS"` (or `"ERROR"`) so
+Claude can signal how a task turned out. Unknown names are rejected with the
+list of valid interpretations. The cue plays, finishes, pauses
+(`pause_after_seconds`), then the utterance speaks. Cues apply only when
+queued for playback (not with the CLI's `--stdout`/`--no-play`).
+
 ## Configuration
 
 ### Server Config
@@ -199,6 +226,50 @@ When `model_idle_timeout_minutes` is 0 (default), the daemon preloads the TTS mo
 | ------------------- | ------- | --------------------------------------------------------------------------------------------- |
 | `emulate_for_local` | false   | Approximate SSML on local engines (spell acronyms, pauses, casing)                            |
 | `acronyms_file`     | null    | Path to file of extra acronyms to spell out (whitespace, comma, pipe, or semicolon separated) |
+
+#### `interpretations` section
+
+Outcome cues played before an utterance (see [Interpretations](#interpretations-outcome-cues)).
+
+| Setting               | Default | Description                                   |
+| --------------------- | ------- | --------------------------------------------- |
+| `pause_after_seconds` | 0.3     | Pause after a cue finishes, before the speech |
+| `map`                 | (below) | Maps an interpretation name to its indication |
+
+Each `map` entry is one of two indication types:
+
+```json
+{
+  "interpretations": {
+    "pause_after_seconds": 0.3,
+    "map": {
+      "SUCCESS": {
+        "type": "notes",
+        "notes": [
+          { "pitch": "Eb3", "seconds": 0.15 },
+          { "pitch": "G#3", "seconds": 0.9 }
+        ]
+      },
+      "ERROR": {
+        "type": "notes",
+        "notes": [
+          { "pitch": "Eb4", "seconds": 0.3 },
+          { "pitch": "D4", "seconds": 0.2 },
+          { "pitch": "Bb2", "seconds": 0.2 },
+          { "pitch": "Bb2", "seconds": 0.2 }
+        ]
+      },
+      "DEPLOY": { "type": "sound_file", "path": "/abs/path/to/chime.wav" }
+    }
+  }
+}
+```
+
+- `notes` — a list of `{pitch, seconds}`; pitch is `[A-G][b/#]?[0-8]` (e.g. `Eb3`, `G#3`).
+- `sound_file` — an absolute path (`~` is expanded); the file plays to completion, then the pause.
+
+`SUCCESS` and `ERROR` are built in, so they work even if you define a custom
+`map`; an entry of the same name overrides the built-in.
 
 ### Settings (via Web UI or API)
 
