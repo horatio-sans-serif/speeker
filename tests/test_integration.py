@@ -34,9 +34,30 @@ skip_no_kokoro = pytest.mark.skipif(
 
 @pytest.fixture
 def temp_speeker_dir(tmp_path):
-    """Create a temporary speeker directory."""
+    """Create a temporary speeker directory, fully isolated from the real one.
+
+    SPEEKER_DIR alone is not enough -- ``speeker.queue_db`` caches its sqlite
+    connection in a thread-local that persists between tests. If an earlier
+    test opened a connection to the real DB, ``enqueue("Test message", ...)``
+    here would write to ~/Library/.../queue.db. That actually happened: the
+    user's history accumulated "Test message" / "Integration test message"
+    rows whenever pytest ran. So we drop the cached connection before AND
+    after each test, forcing a fresh connection scoped to tmp_path.
+    """
+    import speeker.queue_db as qdb
+
+    def _drop_conn():
+        if hasattr(qdb._local, "conn") and qdb._local.conn is not None:
+            try:
+                qdb._local.conn.close()
+            except Exception:
+                pass
+            qdb._local.conn = None
+
+    _drop_conn()
     with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
         yield tmp_path
+    _drop_conn()
 
 
 class TestPocketTTSGeneration:

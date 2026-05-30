@@ -149,6 +149,86 @@ def test_empty_input():
     assert preprocess_for_tts(None) is None
 
 
+def test_pronunciation_overrides_basic():
+    """User overrides apply as whole-word, case-insensitive substitutions."""
+    from unittest.mock import patch
+    from speeker import preprocessing
+
+    # Bypass the module-level cache so each test sees its own overrides
+    preprocessing._cached_overrides.cache_clear()
+    with patch(
+        "speeker.preprocessing.get_pronunciation_overrides",
+        create=True,
+        return_value={"compass": "kom pass", "progress": "prah gress"},
+    ):
+        result = preprocess_for_tts("the compass shows progress north")
+
+    # Cleanup for the next test
+    preprocessing._cached_overrides.cache_clear()
+
+    assert "kom pass" in result
+    assert "prah gress" in result
+    # Original spellings are gone (replaced)
+    assert "compass" not in result.lower().replace("kom pass", "")
+    assert "progress" not in result.lower().replace("prah gress", "")
+
+
+def test_pronunciation_overrides_case_insensitive():
+    """Matches regardless of input case but the replacement is literal."""
+    from unittest.mock import patch
+    from speeker import preprocessing
+
+    preprocessing._cached_overrides.cache_clear()
+    with patch(
+        "speeker.preprocessing.get_pronunciation_overrides",
+        create=True,
+        return_value={"compass": "kom pass"},
+    ):
+        result = preprocess_for_tts("Compass and COMPASS and compass")
+    preprocessing._cached_overrides.cache_clear()
+
+    # All three forms replaced.
+    assert result.count("kom pass") == 3
+
+
+def test_pronunciation_overrides_word_boundary():
+    """Overrides must not match substrings inside other words."""
+    from unittest.mock import patch
+    from speeker import preprocessing
+
+    preprocessing._cached_overrides.cache_clear()
+    with patch(
+        "speeker.preprocessing.get_pronunciation_overrides",
+        create=True,
+        return_value={"pass": "PASS-REPLACED"},
+    ):
+        # "compass" contains "pass" but is a different word -- must NOT match.
+        result = preprocess_for_tts("compass and pass")
+    preprocessing._cached_overrides.cache_clear()
+
+    assert "compass" in result.lower()  # untouched
+    assert "PASS-REPLACED" in result    # standalone matched
+
+
+def test_pronunciation_overrides_empty_by_default():
+    """No overrides configured -> no substitutions."""
+    from unittest.mock import patch
+    from speeker import preprocessing
+
+    preprocessing._cached_overrides.cache_clear()
+    with patch(
+        "speeker.preprocessing.get_pronunciation_overrides",
+        create=True,
+        return_value={},
+    ):
+        result = preprocess_for_tts("the compass shows progress")
+    preprocessing._cached_overrides.cache_clear()
+
+    # Original spellings preserved.
+    assert "compass" in result
+    assert "progress" in result
+
+
 if __name__ == "__main__":
     import traceback
 

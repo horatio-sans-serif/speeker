@@ -175,53 +175,50 @@ class TestSanitizeValue:
 
 
 class TestRenderMetadata:
-    """Tests for render_metadata function."""
+    """Tests for render_metadata function.
+
+    render_metadata was simplified: it now renders only the message's
+    ``display_name`` (or its ``queue`` if no display_name) -- the legacy
+    behavior of dumping every metadata key was too noisy in the UI.
+    """
 
     def test_render_metadata_none_returns_placeholder(self):
-        """Test None metadata returns placeholder."""
+        """None metadata renders the no-data placeholder."""
         result = render_metadata(None)
         assert 'class="no-data"' in result
-        assert "-" in result
 
     def test_render_metadata_empty_dict_returns_placeholder(self):
-        """Test empty dict returns placeholder."""
+        """Empty dict renders the no-data placeholder."""
         result = render_metadata({})
         assert 'class="no-data"' in result
 
-    def test_render_metadata_single_key(self):
-        """Test single key-value pair."""
+    def test_render_metadata_display_name_wins(self):
+        """display_name is shown when present, even with other keys."""
+        result = render_metadata({
+            "queue": "rm", "display_name": "rocket man", "interpretation": "SUCCESS",
+        })
+        assert "rocket man" in result
+        # Other metadata keys should NOT leak into the rendered output.
+        assert "rm" not in result.replace("rocket man", "")
+        assert "SUCCESS" not in result
+        assert "interpretation" not in result
+        assert "queue:" not in result
+
+    def test_render_metadata_falls_back_to_queue(self):
+        """When display_name is missing, the queue id is shown instead."""
         result = render_metadata({"queue": "rm"})
-        assert 'class="kv"' in result
-        assert 'class="key"' in result
-        assert 'class="value"' in result
-        assert "queue:" in result
         assert "rm" in result
 
-    def test_render_metadata_multiple_keys(self):
-        """Test multiple key-value pairs."""
-        result = render_metadata({"queue": "rm", "priority": "high"})
-        assert "queue:" in result
-        assert "rm" in result
-        assert "priority:" in result
-        assert "high" in result
+    def test_render_metadata_falls_back_to_placeholder_when_only_other_keys(self):
+        """Without display_name/queue, render the placeholder."""
+        result = render_metadata({"interpretation": "SUCCESS", "engine": "polly"})
+        assert 'class="no-data"' in result
 
-    def test_render_metadata_escapes_html_in_keys(self):
-        """Test HTML in keys is escaped."""
-        result = render_metadata({"<script>": "value"})
-        assert "&lt;script&gt;" in result
+    def test_render_metadata_escapes_html_in_display_name(self):
+        """HTML in the displayed value is escaped."""
+        result = render_metadata({"display_name": "<script>alert(1)</script>"})
         assert "<script>" not in result
-
-    def test_render_metadata_escapes_html_in_values(self):
-        """Test HTML in values is escaped."""
-        result = render_metadata({"key": "<b>bold</b>"})
-        assert "&lt;b&gt;" in result
-        assert "<b>" not in result
-
-    def test_render_metadata_handles_nested_dict(self):
-        """Test nested dict value is JSON encoded."""
-        result = render_metadata({"config": {"nested": "value"}})
-        assert "nested" in result
-        assert "value" in result
+        assert "&lt;script&gt;" in result
 
 
 # --- Additional Edge Case Tests ---
@@ -357,53 +354,28 @@ class TestFormatTimeEdgeCases:
 
 
 class TestRenderMetadataEdgeCases:
-    """Additional edge cases for render_metadata."""
+    """Additional edge cases for render_metadata (display_name-only contract)."""
 
-    def test_render_metadata_numeric_values(self):
-        """Test numeric values."""
-        result = render_metadata({"count": 42, "rate": 3.14})
-        assert "42" in result
-        assert "3.14" in result
+    def test_render_metadata_unicode_display_name(self):
+        """Unicode display_name passes through (only HTML entities are escaped)."""
+        result = render_metadata({"display_name": "日本語"})
+        assert "日本語" in result
 
-    def test_render_metadata_boolean_values(self):
-        """Test boolean values."""
-        result = render_metadata({"active": True, "deleted": False})
-        assert "True" in result
-        assert "False" in result
+    def test_render_metadata_empty_display_name_falls_back_to_queue(self):
+        """Empty display_name -> use queue id instead."""
+        result = render_metadata({"display_name": "", "queue": "fallback-queue"})
+        assert "fallback-queue" in result
 
-    def test_render_metadata_none_value(self):
-        """Test None as a value (not the whole metadata)."""
-        result = render_metadata({"key": None})
-        # None value should become empty string
-        assert "key:" in result
+    def test_render_metadata_whitespace_display_name_falls_back(self):
+        """Whitespace-only display_name -> use queue id instead."""
+        result = render_metadata({"display_name": "   ", "queue": "fallback"})
+        assert "fallback" in result
 
-    def test_render_metadata_xss_in_key_and_value(self):
-        """Test XSS attempt in both key and value."""
-        result = render_metadata({'<script>alert(1)</script>': '<img onerror=alert(1)>'})
-        assert "<script>" not in result
-        assert "<img" not in result
-        assert "&lt;" in result
-
-    def test_render_metadata_very_long_value(self):
-        """Test very long string value."""
-        result = render_metadata({"key": "x" * 1000})
-        assert "x" * 100 in result  # At least partial
-
-    def test_render_metadata_unicode_key_and_value(self):
-        """Test unicode in both key and value."""
-        result = render_metadata({"键": "值"})
-        assert "键" in result
-        assert "值" in result
-
-    def test_render_metadata_spaces_in_key(self):
-        """Test key with spaces."""
-        result = render_metadata({"my key": "value"})
-        assert "my key:" in result
-
-    def test_render_metadata_empty_string_value(self):
-        """Test empty string as value."""
-        result = render_metadata({"key": ""})
-        assert "key:" in result
+    def test_render_metadata_long_display_name_preserved(self):
+        """Long display_name is rendered (no truncation enforced server-side)."""
+        long_name = "x" * 500
+        result = render_metadata({"display_name": long_name})
+        assert long_name in result
 
 
 # HTTP Route Tests
@@ -425,109 +397,30 @@ class TestIndexRoute:
         assert "text/html" in response.headers["content-type"]
         assert "Speeker" in response.text
 
-    @patch("speeker.web.get_history")
-    def test_index_shows_empty_state(self, mock_history, client):
-        """Test index shows no messages when empty."""
-        mock_history.return_value = []
+    def test_index_returns_react_shell(self, client):
+        """The index now serves a static React shell -- no server-rendered rows.
+
+        The previous shape (server-rendered HTML rows) was tested by mocking
+        ``get_history`` and matching on item text. After the React rewrite,
+        all item rendering happens client-side via /api/items, so the index
+        page is a constant; we assert on its structural markers.
+        """
         response = client.get("/")
         assert response.status_code == 200
-        assert "No messages yet" in response.text
+        # The page mounts React into <div id="root">.
+        assert 'id="root"' in response.text
+        # And loads React + Babel from CDN.
+        assert "react@18" in response.text
+        assert "babel/standalone" in response.text
+        # And contains both tab buttons.
+        assert "Queue History" in response.text
+        assert "Settings" in response.text
 
-    @patch("speeker.web.get_history")
-    def test_index_shows_items(self, mock_history, client):
-        """Test index renders queue items."""
-        mock_history.return_value = [
-            {
-                "id": 1,
-                "text": "Test message",
-                "created_at": "2024-01-15T14:30:00",
-                "played_at": None,
-                "audio_path": None,
-                "session_id": None,
-                "metadata": None,
-            }
-        ]
-        response = client.get("/")
+    def test_index_legacy_query_param_returns_200(self, client):
+        """Legacy ?q= deep links don't crash (param is ignored, page still loads)."""
+        response = client.get("/?q=hello")
         assert response.status_code == 200
-        assert "Test message" in response.text
-        assert "Pending" in response.text
-
-    @patch("speeker.web.get_history")
-    def test_index_escapes_html_in_text(self, mock_history, client):
-        """Test index escapes HTML in message text."""
-        mock_history.return_value = [
-            {
-                "id": 1,
-                "text": "<script>alert('xss')</script>",
-                "created_at": "2024-01-15T14:30:00",
-                "played_at": None,
-                "audio_path": None,
-                "session_id": None,
-                "metadata": None,
-            }
-        ]
-        response = client.get("/")
-        assert response.status_code == 200
-        # The script tags should be escaped so they don't execute
-        assert "&lt;script&gt;" in response.text
-        assert "&lt;/script&gt;" in response.text
-
-    @patch("speeker.web.search")
-    def test_index_with_search_query(self, mock_search, client):
-        """Test index with search query uses search function."""
-        mock_search.return_value = [
-            {
-                "id": 1,
-                "text": "Found item",
-                "created_at": "2024-01-15T14:30:00",
-                "played_at": "2024-01-15T14:31:00",
-                "audio_path": None,
-                "session_id": None,
-                "metadata": None,
-                "score": 0.95,
-            }
-        ]
-        response = client.get("/?q=test")
-        assert response.status_code == 200
-        assert "Found item" in response.text
-        mock_search.assert_called_once_with("test", limit=200)
-
-    @patch("speeker.web.get_history")
-    def test_index_shows_played_status(self, mock_history, client):
-        """Test index shows Played status for played items."""
-        mock_history.return_value = [
-            {
-                "id": 1,
-                "text": "Played message",
-                "created_at": "2024-01-15T14:30:00",
-                "played_at": "2024-01-15T14:31:00",
-                "audio_path": None,
-                "session_id": None,
-                "metadata": None,
-            }
-        ]
-        response = client.get("/")
-        assert response.status_code == 200
-        assert "Played" in response.text
-
-    @patch("speeker.web.get_history")
-    def test_index_renders_metadata(self, mock_history, client):
-        """Test index renders metadata."""
-        mock_history.return_value = [
-            {
-                "id": 1,
-                "text": "Message",
-                "created_at": "2024-01-15T14:30:00",
-                "played_at": None,
-                "audio_path": None,
-                "session_id": None,
-                "metadata": {"queue": "alerts", "source": "monitor"},
-            }
-        ]
-        response = client.get("/")
-        assert response.status_code == 200
-        assert "queue:" in response.text
-        assert "alerts" in response.text
+        assert 'id="root"' in response.text
 
 
 class TestApiItemsRoute:
@@ -750,3 +643,239 @@ class TestSettingsRoute:
         assert response.status_code == 200
         call_kwargs = mock_set.call_args[1]
         assert call_kwargs["session_id"] == "alerts"
+
+
+class TestEffectsRoutes:
+    """Tests for the /api/effects family added with the audio effects feature."""
+
+    @patch("speeker.web.get_effects_config")
+    def test_get_effects_lists_presets_and_current(self, mock_cfg, client):
+        """GET returns the active preset + the full preset catalog with
+        descriptions. UI uses this to populate the dropdown."""
+        mock_cfg.return_value = {"preset": "studio"}
+        response = client.get("/api/effects")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["current"] == "studio"
+        names = [p["name"] for p in data["presets"]]
+        assert names[0] == "off"  # off always first
+        assert set(names) >= {"off", "studio", "natural", "spacious", "telephone", "robot"}
+        for p in data["presets"]:
+            assert "description" in p
+            assert "effect_count" in p
+
+    @patch("speeker.web.get_effects_config")
+    def test_get_effects_unknown_saved_value_falls_back_to_off(self, mock_cfg, client):
+        """If config.json somehow has a preset name the code doesn't know
+        about, the API must surface a safe default rather than the typo."""
+        mock_cfg.return_value = {"preset": "stale-typo"}
+        response = client.get("/api/effects")
+        assert response.json()["current"] == "off"
+
+    @patch("speeker.web.save_config")
+    @patch("speeker.web.get_config")
+    def test_put_effects_saves_known_preset(self, mock_get, mock_save, client):
+        """A valid preset is persisted and returns restart_required: false
+        because apply_effects re-reads config every utterance."""
+        mock_get.return_value = {"effects": {"preset": "off"}}
+        response = client.put("/api/effects", json={"preset": "natural"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["current"] == "natural"
+        assert body["restart_required"] is False
+        # Saved config reflects the new preset.
+        saved_cfg = mock_save.call_args[0][0]
+        assert saved_cfg["effects"]["preset"] == "natural"
+
+    def test_put_effects_rejects_unknown_preset(self, client):
+        response = client.put("/api/effects", json={"preset": "definitely-not-real"})
+        assert response.status_code == 400
+        # Helpful error message lists the known names.
+        assert "definitely-not-real" in response.json()["detail"]
+
+    # The /api/effects/try handler imports ``enqueue`` and ``start_player``
+    # lazily inside the function body (to keep server import-time
+    # dependency graph small), so the patch target is the source module
+    # rather than the ``speeker.web`` namespace.
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    @patch("speeker.web.get_effects_config")
+    def test_try_with_preset_passes_via_metadata(self, mock_cfg, mock_enqueue, mock_start, client):
+        """Try with an explicit preset attaches it as metadata so the
+        daemon honors it for THIS utterance only -- no swap-and-restore
+        race against the polling interval."""
+        mock_cfg.return_value = {"preset": "off"}
+        mock_enqueue.return_value = 999
+        response = client.post("/api/effects/try", json={"preset": "spacious"})
+        assert response.status_code == 200
+        # enqueue called with metadata containing the preset.
+        meta = mock_enqueue.call_args.kwargs["metadata"]
+        assert meta["effects_preset"] == "spacious"
+        assert meta["queue"] == "default"
+        # The previewed phrase is the fixed Pangram chosen for the chain.
+        spoken = mock_enqueue.call_args.args[0]
+        assert "quick brown fox" in spoken.lower()
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    @patch("speeker.web.get_effects_config")
+    def test_try_without_preset_omits_metadata_override(self, mock_cfg, mock_enqueue, mock_start, client):
+        """No preset in body -> no metadata override -> daemon uses the
+        saved preset via apply_effects."""
+        mock_cfg.return_value = {"preset": "studio"}
+        mock_enqueue.return_value = 1000
+        response = client.post("/api/effects/try", json={})
+        assert response.status_code == 200
+        meta = mock_enqueue.call_args.kwargs["metadata"]
+        assert "effects_preset" not in meta
+        # Returned `preset` reflects the saved value when none was sent.
+        assert response.json()["preset"] == "studio"
+
+    def test_try_rejects_unknown_preset(self, client):
+        response = client.post("/api/effects/try", json={"preset": "robot-but-misspelled"})
+        assert response.status_code == 400
+
+
+class TestToneTunesAndPlay:
+    """The /api/tones/tunes catalog + /api/tones/play preview endpoint."""
+
+    def test_tunes_catalog_returns_expected_shape(self, client):
+        response = client.get("/api/tones/tunes")
+        assert response.status_code == 200
+        data = response.json()
+        names = [t["name"] for t in data["tunes"]]
+        # A couple of the well-known entries we curated.
+        assert "Rising major triad" in names
+        assert "NBC chimes" in names
+        for t in data["tunes"]:
+            assert all(isinstance(n, str) for n in t["notes"])
+            assert len(t["notes"]) > 0
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_play_notes_enqueues_dollar_tokens(self, mock_enqueue, mock_start, client):
+        """Explicit notes are converted to ``$Note`` tokens. The text has
+        no body so the player extracts the tones and skips TTS."""
+        mock_enqueue.return_value = 5050
+        response = client.post(
+            "/api/tones/play",
+            json={"notes": ["E4", "G4", "C5"], "duration": 0.2},
+        )
+        assert response.status_code == 200
+        text = mock_enqueue.call_args.args[0]
+        assert text == "$E4 $G4 $C5"
+        meta = mock_enqueue.call_args.kwargs["metadata"]
+        # Duration carried through as metadata so the daemon plays at
+        # the requested per-note length, not the 0.8s default.
+        assert meta["tone_duration"] == 0.2
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    @patch("speeker.web.get_tones_config")
+    def test_play_kind_intro_reads_saved_notes(self, mock_cfg, mock_enqueue, mock_start, client):
+        """``kind: 'intro'`` plays the saved intro notes at the saved duration."""
+        mock_cfg.return_value = {"intro": ["E4", "G4", "C5"], "duration_seconds": 0.12}
+        mock_enqueue.return_value = 5051
+        response = client.post("/api/tones/play", json={"kind": "intro"})
+        assert response.status_code == 200
+        assert mock_enqueue.call_args.args[0] == "$E4 $G4 $C5"
+        assert mock_enqueue.call_args.kwargs["metadata"]["tone_duration"] == 0.12
+
+    def test_play_rejects_invalid_note(self, client):
+        response = client.post("/api/tones/play", json={"notes": ["E4", "wat"]})
+        assert response.status_code == 400
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_play_accepts_duration_multiplier_notation(self, mock_enqueue, mock_start, client):
+        """The new ``$Pitch:Mult`` syntax (e.g. ``C5:4``) must validate +
+        round-trip into enqueued text -- this is how NBC chimes and
+        Beethoven's 5th get their long final notes."""
+        mock_enqueue.return_value = 5060
+        response = client.post(
+            "/api/tones/play",
+            json={"notes": ["G4", "E4", "C5:4"], "duration": 0.18},
+        )
+        assert response.status_code == 200
+        text = mock_enqueue.call_args.args[0]
+        # The colon-multiplier is preserved through to the enqueued text
+        # so the daemon's parse_note_token can pick it up.
+        assert text == "$G4 $E4 $C5:4"
+
+    def test_play_accepts_fractional_multiplier(self, client):
+        """Fractional multipliers (``:0.5``, ``:.5``) are accepted."""
+        with patch("speeker.queue_db.enqueue") as mock_enqueue, \
+             patch("speeker.cli.start_player"):
+            mock_enqueue.return_value = 5061
+            response = client.post(
+                "/api/tones/play", json={"notes": ["F4:0.5", "G4:.5", "A4"]},
+            )
+            assert response.status_code == 200
+
+    def test_play_rejects_missing_inputs(self, client):
+        response = client.post("/api/tones/play", json={})
+        assert response.status_code == 400
+
+    def test_play_clamps_extreme_duration(self, client):
+        """A user typing 100 in the duration field shouldn't lock the
+        daemon into a multi-minute tone. Server clamps to 2.0 max."""
+        with patch("speeker.queue_db.enqueue") as mock_enqueue, \
+             patch("speeker.cli.start_player"):
+            mock_enqueue.return_value = 5052
+            response = client.post(
+                "/api/tones/play",
+                json={"notes": ["E4"], "duration": 999.0},
+            )
+            assert response.status_code == 200
+            assert mock_enqueue.call_args.kwargs["metadata"]["tone_duration"] == 2.0
+
+
+class TestEnginesTryRoute:
+    """Engine/voice preview: a 'Try it' button in the Engine & Voice section."""
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_try_attaches_engine_voice_metadata(self, mock_enqueue, mock_start, client):
+        """Engine + voice arrive as per-item metadata. process_queue uses
+        these to override the saved session settings on this one
+        utterance only."""
+        mock_enqueue.return_value = 4242
+        response = client.post(
+            "/api/engines/try",
+            json={"engine": "polly", "voice": "Matthew"},
+        )
+        assert response.status_code == 200
+        meta = mock_enqueue.call_args.kwargs["metadata"]
+        assert meta["queue"] == "default"
+        assert meta["engine"] == "polly"
+        assert meta["voice"] == "Matthew"
+        # The previewed phrase identifies the purpose.
+        assert "preview" in mock_enqueue.call_args.args[0].lower()
+
+    @patch("speeker.cli.start_player")
+    @patch("speeker.queue_db.enqueue")
+    def test_try_omits_missing_axes(self, mock_enqueue, mock_start, client):
+        """Omitted engine/voice fall back to the saved defaults via the
+        normal metadata absence. The Try endpoint doesn't fabricate
+        engine='None' style sentinels."""
+        mock_enqueue.return_value = 4243
+        response = client.post("/api/engines/try", json={"voice": "Ruth"})
+        assert response.status_code == 200
+        meta = mock_enqueue.call_args.kwargs["metadata"]
+        assert meta["voice"] == "Ruth"
+        assert "engine" not in meta
+
+    def test_try_rejects_unknown_engine(self, client):
+        """Bogus engine -> 400 with the list of known engines in the
+        detail (helpful for the UI / human)."""
+        response = client.post(
+            "/api/engines/try", json={"engine": "make-believe-engine"},
+        )
+        assert response.status_code == 400
+        assert "make-believe-engine" in response.json()["detail"]
+
+    def test_try_rejects_unknown_voice(self, client):
+        response = client.post(
+            "/api/engines/try", json={"voice": "Joanna-but-misspelled"},
+        )
+        assert response.status_code == 400
