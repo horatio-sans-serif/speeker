@@ -1,6 +1,9 @@
 """Text preprocessing for TTS - converts symbols to spoken words."""
 
 import re
+from functools import lru_cache
+
+from .config import get_pronunciation_overrides
 
 # Symbol to spoken word mappings
 SYMBOL_REPLACEMENTS = [
@@ -182,12 +185,79 @@ LATE_PATTERNS = [
 ]
 
 
-def preprocess_for_tts(text: str, acronyms: set[str] | None = None) -> str:
+def _compile_overrides(items: tuple[tuple[str, str], ...]) -> list[tuple[re.Pattern, str]]:
+    """Compile a hashable items tuple into (pattern, replacement) pairs.
+
+    Kept module-private and hashable-argument-only so ``lru_cache`` can store
+    the compiled patterns across calls without re-running ``re.compile``.
+    """
+    compiled = []
+    for word, replacement in items:
+        if not word:
+            continue
+        compiled.append((re.compile(rf"\b{re.escape(word)}\b", re.IGNORECASE), replacement))
+    return compiled
+
+
+@lru_cache(maxsize=16)
+def _cached_overrides(items: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern, str], ...]:
+    return tuple(_compile_overrides(items))
+
+
+def _resolve_override_value(value, engine: str | None) -> str | None:
+    """Pick the right replacement for *engine* from a config entry.
+
+    A value can be either a plain string (applies to all engines) or a
+    dict ``{engine_name: replacement, ...}`` with an optional ``"default"``
+    fallback. Returns the chosen replacement or ``None`` to skip.
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        # Engine-specific entry wins.
+        if engine and engine in value and isinstance(value[engine], str):
+            return value[engine]
+        if "default" in value and isinstance(value["default"], str):
+            return value["default"]
+    return None
+
+
+def _load_pronunciation_overrides(engine: str | None = None) -> tuple[tuple[re.Pattern, str], ...]:
+    """Load and compile user-supplied pronunciation overrides for *engine*.
+
+    Patterns are cached per ``(engine, items)`` tuple so the regex compile
+    is paid once per distinct configuration -- changing the active engine
+    or updating the config recomputes naturally.
+    """
+    try:
+        raw = get_pronunciation_overrides()
+    except Exception:
+        return ()
+    resolved: list[tuple[str, str]] = []
+    for word, value in raw.items():
+        chosen = _resolve_override_value(value, engine)
+        if chosen:
+            resolved.append((word, chosen))
+    return _cached_overrides(tuple(sorted(resolved)))
+
+
+def preprocess_for_tts(
+    text: str,
+    acronyms: set[str] | None = None,
+    *,
+    engine: str | None = None,
+) -> str:
     """Preprocess text for better TTS output.
 
     Converts symbols, abbreviations, and technical notation to spoken
     equivalents, fixes commonly mispronounced tool names (e.g. "uv" ->
     "you vee"), and spells out known acronyms letter-by-letter.
+
+    User-supplied ``pronunciation.overrides`` from ``config.json`` run
+    LAST so they win against any built-in transformation. When *engine*
+    is supplied, per-engine override variants are honored (e.g. a
+    ``{"polly": "...", "pocket-tts": "..."}`` entry picks the right one);
+    otherwise the ``"default"`` value of any per-engine entry is used.
 
     *acronyms* defaults to the built-in set (``COMMON_ACRONYMS``); the player
     passes that set extended by the configured ``ssml.acronyms_file`` so every
@@ -239,6 +309,13 @@ def preprocess_for_tts(text: str, acronyms: set[str] | None = None) -> str:
     # Apply late patterns
     for pattern, replacement in LATE_PATTERNS:
         result = re.sub(pattern, replacement, result)
+
+    # User pronunciation overrides -- applied LAST so a user override wins
+    # over any built-in TERM_PRONUNCIATIONS / acronym substitution above.
+    # Engine-specific variants (when *engine* is set) take precedence over
+    # the entry's "default" string.
+    for pattern, replacement in _load_pronunciation_overrides(engine):
+        result = pattern.sub(replacement, result)
 
     # Clean up multiple spaces
     result = re.sub(r'\s+', ' ', result)

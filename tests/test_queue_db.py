@@ -7,6 +7,8 @@ import pytest
 
 from speeker.queue_db import (
     get_queue_label,
+    get_spoken_queue_title,
+    get_last_played_queue,
     relative_time,
     enqueue,
     get_sessions_with_pending,
@@ -20,6 +22,9 @@ from speeker.queue_db import (
     cleanup_old_entries,
     get_last_utterance_time,
     set_last_utterance_time,
+    set_currently_playing,
+    clear_currently_playing,
+    get_currently_playing,
     search,
     search_fuzzy,
 )
@@ -253,6 +258,38 @@ class TestGetQueueLabelEdgeCases:
         """Test queue name with spaces."""
         result = get_queue_label("my queue")
         assert result == "queue my queue"
+
+
+class TestGetSpokenQueueTitle:
+    """Tests for get_spoken_queue_title (the auto-label friendly form)."""
+
+    def test_none_returns_none(self):
+        assert get_spoken_queue_title(None) is None
+
+    def test_empty_returns_none(self):
+        assert get_spoken_queue_title("") is None
+
+    def test_default_returns_none(self):
+        # The default/unnamed queue has no meaningful title to speak.
+        assert get_spoken_queue_title("default") is None
+
+    def test_hyphens_become_spaces(self):
+        assert get_spoken_queue_title("compass-docs") == "compass docs"
+        assert get_spoken_queue_title("audio-speeker") == "audio speeker"
+
+    def test_underscores_become_spaces(self):
+        assert get_spoken_queue_title("my_project") == "my project"
+
+    def test_mixed_separators(self):
+        assert get_spoken_queue_title("foo-bar_baz") == "foo bar baz"
+
+    def test_simple_name_unchanged(self):
+        assert get_spoken_queue_title("rm") == "rm"
+        assert get_spoken_queue_title("myproject") == "myproject"
+
+    def test_whitespace_only_returns_none(self):
+        # All-whitespace strips to empty -> no title.
+        assert get_spoken_queue_title("   ") is None
 
 
 # --- Database Integration Tests ---
@@ -546,6 +583,72 @@ class TestUtteranceTime:
         result = get_last_utterance_time()
         assert result is not None
         assert isinstance(result, datetime)
+
+    def test_last_played_queue_none_initially(self, temp_db):
+        """No utterances yet -> no last queue."""
+        assert get_last_played_queue() is None
+
+    def test_set_last_utterance_records_queue_id(self, temp_db):
+        """Passing queue_id persists it for the next batch's auto-label."""
+        set_last_utterance_time(queue_id="compass-docs")
+        assert get_last_played_queue() == "compass-docs"
+        # And the time still round-trips:
+        assert isinstance(get_last_utterance_time(), datetime)
+
+    def test_set_last_utterance_without_queue_preserves_previous(self, temp_db):
+        """Calling without a queue_id must not clobber the stored one."""
+        set_last_utterance_time(queue_id="compass-docs")
+        # Subsequent call w/o queue_id updates only the time.
+        set_last_utterance_time()
+        assert get_last_played_queue() == "compass-docs"
+
+    def test_set_last_utterance_overwrites_queue_id(self, temp_db):
+        """Subsequent batch from a different queue overwrites the last queue."""
+        set_last_utterance_time(queue_id="queue-a")
+        set_last_utterance_time(queue_id="queue-b")
+        assert get_last_played_queue() == "queue-b"
+
+
+class TestCurrentlyPlaying:
+    """Tests for the daemon -> web-UI 'currently speaking' side channel."""
+
+    def test_get_currently_playing_none_initially(self, temp_db):
+        """No utterance has started -> None."""
+        assert get_currently_playing() is None
+
+    def test_set_then_get_returns_id(self, temp_db):
+        set_currently_playing(42)
+        assert get_currently_playing() == 42
+
+    def test_clear_removes_marker(self, temp_db):
+        set_currently_playing(42)
+        clear_currently_playing()
+        assert get_currently_playing() is None
+
+    def test_overwrite_replaces(self, temp_db):
+        set_currently_playing(1)
+        set_currently_playing(2)
+        assert get_currently_playing() == 2
+
+    def test_stale_value_returns_none(self, temp_db):
+        """Past the stale window, get returns None even if id is still set.
+
+        Protects the UI against a daemon crash that left the marker set --
+        we don't want a phantom highlight forever.
+        """
+        import speeker.queue_db as qdb
+        from datetime import datetime, timedelta, timezone
+
+        set_currently_playing(99)
+        # Hand-roll a stale started_at via the connection.
+        old = (datetime.now(timezone.utc) - timedelta(seconds=qdb._CURRENTLY_PLAYING_STALE_AFTER_SECONDS + 10)).isoformat()
+        with qdb.get_connection() as conn:
+            conn.execute(
+                "UPDATE playback_state SET currently_playing_started_at = ? WHERE id = 1",
+                (old,),
+            )
+            conn.commit()
+        assert get_currently_playing() is None
 
 
 class TestSearch:

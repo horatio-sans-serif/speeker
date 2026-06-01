@@ -66,9 +66,26 @@ def _init_db(conn: sqlite3.Connection) -> None:
     conn.execute("""
         CREATE TABLE IF NOT EXISTS playback_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
-            last_utterance_at TEXT
+            last_utterance_at TEXT,
+            last_queue_id TEXT,
+            currently_playing_id INTEGER,
+            currently_playing_started_at TEXT
         )
     """)
+    # Migration: add columns on pre-existing databases.
+    # - last_queue_id: detects queue context switches between bursts.
+    # - currently_playing_id / currently_playing_started_at: the side channel
+    #   the player uses to tell the web UI "this item is being spoken NOW".
+    #   started_at lets the API age-out a stale value after a daemon crash.
+    for ddl in (
+        "ALTER TABLE playback_state ADD COLUMN last_queue_id TEXT",
+        "ALTER TABLE playback_state ADD COLUMN currently_playing_id INTEGER",
+        "ALTER TABLE playback_state ADD COLUMN currently_playing_started_at TEXT",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             session_id TEXT PRIMARY KEY,
@@ -252,17 +269,122 @@ def get_last_utterance_time() -> datetime | None:
         return None
 
 
-def set_last_utterance_time() -> None:
-    """Update the last utterance time to now."""
+def set_last_utterance_time(queue_id: str | None = None) -> None:
+    """Update the last utterance time (and optionally the last queue id) to now.
+
+    Passing ``queue_id`` also records *which* queue was last spoken; the player
+    uses both values to decide whether to auto-prepend a queue title before
+    the next single message (see ``get_auto_label_config`` and
+    ``process_queue``). When ``queue_id`` is ``None`` the existing value is
+    preserved.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    with get_connection() as conn:
+        if queue_id is None:
+            conn.execute(
+                """
+                INSERT INTO playback_state (id, last_utterance_at) VALUES (1, ?)
+                ON CONFLICT(id) DO UPDATE SET last_utterance_at = excluded.last_utterance_at
+                """,
+                (now,),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO playback_state (id, last_utterance_at, last_queue_id)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    last_utterance_at = excluded.last_utterance_at,
+                    last_queue_id = excluded.last_queue_id
+                """,
+                (now, queue_id),
+            )
+        conn.commit()
+
+
+def get_last_played_queue() -> str | None:
+    """Return the queue id of the most recent utterance, or None if unknown."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT last_queue_id FROM playback_state WHERE id = 1"
+        )
+        row = cursor.fetchone()
+        if row and row["last_queue_id"]:
+            return row["last_queue_id"]
+        return None
+
+
+# Stale "currently_playing" entries time out after this many seconds. Real
+# utterances rarely exceed ~30s; anything older is presumed orphaned by a
+# daemon crash so the UI doesn't permanently highlight a phantom card.
+_CURRENTLY_PLAYING_STALE_AFTER_SECONDS = 90
+
+
+def set_currently_playing(item_id: int) -> None:
+    """Mark *item_id* as the currently-playing queue row.
+
+    Called by the player daemon immediately before speaking. The web UI
+    polls and decorates the matching card with a "speaking" background --
+    so the listener can see which card is being read aloud right now.
+    """
+    now = datetime.now(timezone.utc).isoformat()
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO playback_state (id, last_utterance_at) VALUES (1, ?)
-            ON CONFLICT(id) DO UPDATE SET last_utterance_at = excluded.last_utterance_at
+            INSERT INTO playback_state (id, currently_playing_id, currently_playing_started_at)
+            VALUES (1, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                currently_playing_id = excluded.currently_playing_id,
+                currently_playing_started_at = excluded.currently_playing_started_at
             """,
-            (datetime.now(timezone.utc).isoformat(),),
+            (int(item_id), now),
         )
         conn.commit()
+
+
+def clear_currently_playing() -> None:
+    """Clear the currently-playing marker (called when an utterance ends)."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            UPDATE playback_state
+            SET currently_playing_id = NULL,
+                currently_playing_started_at = NULL
+            WHERE id = 1
+            """,
+        )
+        conn.commit()
+
+
+def get_currently_playing() -> int | None:
+    """Return the item id being spoken NOW, or None.
+
+    Ages out a stale value: if the started_at timestamp is older than
+    ``_CURRENTLY_PLAYING_STALE_AFTER_SECONDS``, return None (and don't
+    re-clear -- the next ``set_currently_playing`` will overwrite it).
+    """
+    with get_connection() as conn:
+        cursor = conn.execute(
+            """
+            SELECT currently_playing_id, currently_playing_started_at
+            FROM playback_state WHERE id = 1
+            """
+        )
+        row = cursor.fetchone()
+        if not row or row["currently_playing_id"] is None:
+            return None
+        started_at = row["currently_playing_started_at"]
+        if started_at:
+            try:
+                started = datetime.fromisoformat(started_at)
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                age = (datetime.now(timezone.utc) - started).total_seconds()
+                if age > _CURRENTLY_PLAYING_STALE_AFTER_SECONDS:
+                    return None
+            except ValueError:
+                pass  # Bad timestamp -> trust the id anyway, the cap above will catch real staleness later
+        return int(row["currently_playing_id"])
 
 
 def cleanup_old_entries(days: int = 7) -> int:
@@ -312,12 +434,31 @@ def relative_time(dt_str: str) -> str | None:
 
 
 def get_queue_label(queue_id: str | None) -> str:
-    """Get a human-friendly label for a queue ID."""
+    """Get a human-friendly label for a queue ID.
+
+    Returns the legacy "queue <8-char-prefix>" form used by the multi-message
+    "For queue X, there are N messages" header. For the spoken title used by
+    auto-labeling (e.g., 'compass docs'), use ``get_spoken_queue_title``.
+    """
     if not queue_id or queue_id == "default":
         return "the default queue"
     # Use first 8 chars of queue ID
     short_id = queue_id[:8] if len(queue_id) > 8 else queue_id
     return f"queue {short_id}"
+
+
+def get_spoken_queue_title(queue_id: str | None) -> str | None:
+    """Friendly spoken title for a queue id, or None when no title applies.
+
+    Returns ``None`` for the unnamed/default queue (so the auto-label path
+    skips adding a meaningless prefix). For named queues, hyphens and
+    underscores become spaces — matching the convention the Stop hook's
+    ``spoken_title`` already uses — so 'compass-docs' speaks as 'compass docs'.
+    """
+    if not queue_id or queue_id == "default":
+        return None
+    title = queue_id.replace("-", " ").replace("_", " ").strip()
+    return title or None
 
 
 # --- Settings ---

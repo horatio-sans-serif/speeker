@@ -271,6 +271,36 @@ Each `map` entry is one of two indication types:
 `SUCCESS` and `ERROR` are built in, so they work even if you define a custom
 `map`; an entry of the same name overrides the built-in.
 
+#### `auto_label` section
+
+When a single bare message comes through the queue (e.g., `"Claude finished"`
+enqueued without a `title=` prefix), the daemon prepends the queue's spoken
+title — but only after a quiet period or when the queue context just changed.
+A back-to-back burst from the same queue is **not** re-announced.
+
+| Setting                   | Default | Description                                                               |
+| ------------------------- | ------- | ------------------------------------------------------------------------- |
+| `enabled`                 | true    | Master switch                                                             |
+| `quiet_threshold_seconds` | 120     | Silence (seconds) before a same-queue message gets relabeled              |
+| `tone`                    | `$Eb4`  | Tone token spoken before the title (same syntax as inline `$Note` tokens) |
+
+Trigger matrix (with `enabled: true`, named queue, threshold = 120s):
+
+| Last utterance | Last queue      | This queue     | Relabel?                                         |
+| -------------- | --------------- | -------------- | ------------------------------------------------ |
+| never          | —               | `compass-docs` | yes                                              |
+| ≤ 120s ago     | `compass-docs`  | `compass-docs` | no                                               |
+| ≤ 120s ago     | `audio-speeker` | `compass-docs` | yes (context switch)                             |
+| > 120s ago     | `compass-docs`  | `compass-docs` | yes (after silence)                              |
+| any            | any             | `default`      | no (no spoken title)                             |
+| any            | any             | any            | no (if text already starts with a `$Note` token) |
+
+A queue id like `compass-docs` is spoken as `compass docs`
+(hyphens/underscores → spaces). The `default` queue has no spoken title and
+is never auto-labeled. The auto-label only applies to single-message
+batches; multi-message batches still use the `"For queue X, there are N
+messages."` header.
+
 ### Settings (via Web UI or API)
 
 Settings are hierarchical: global defaults with per-session overrides.

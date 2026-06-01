@@ -18,6 +18,7 @@ from speeker.player import (
     render_interpretation_cue,
     should_announce_intro,
     build_session_script,
+    compute_auto_label_prefix,
     unload_tts_model,
     NOTE_PATTERN,
     POLL_INTERVAL,
@@ -87,41 +88,64 @@ class _PlayerRecordingEngine:
 
 
 class TestParseNoteToken:
-    """Tests for parse_note_token function."""
+    """Tests for parse_note_token function.
+
+    parse_note_token returns ``(note, octave, multiplier)``. The multiplier
+    defaults to 1.0 when the token has no ``:N`` qualifier, so any tune
+    written before the duration syntax was added continues to behave
+    identically (1.0 * base_duration == base_duration).
+    """
 
     def test_parse_note_token_simple(self):
-        """Test parsing simple note like C4."""
         result = parse_note_token("C4")
-        assert result == ("c", 4)
+        assert result == ("c", 4, 1.0)
 
     def test_parse_note_token_sharp(self):
-        """Test parsing sharp note like F#5."""
         result = parse_note_token("F#5")
-        assert result == ("f#", 5)
+        assert result == ("f#", 5, 1.0)
 
     def test_parse_note_token_flat(self):
-        """Test parsing flat note like Bb3."""
         result = parse_note_token("Bb3")
-        assert result == ("bb", 3)
+        assert result == ("bb", 3, 1.0)
 
     def test_parse_note_token_lowercase(self):
-        """Test parsing lowercase note."""
         result = parse_note_token("e4")
-        assert result == ("e", 4)
+        assert result == ("e", 4, 1.0)
 
     def test_parse_note_token_all_notes(self):
-        """Test parsing all note letters."""
         for note in "ABCDEFG":
             result = parse_note_token(f"{note}4")
             assert result is not None
             assert result[0] == note.lower()
             assert result[1] == 4
+            assert result[2] == 1.0
+
+    def test_parse_note_token_with_integer_multiplier(self):
+        """``C5:4`` -> C5 with 4x base duration (whole-note feel)."""
+        assert parse_note_token("C5:4") == ("c", 5, 4.0)
+
+    def test_parse_note_token_with_fractional_multiplier(self):
+        """``Bb3:0.5`` -> Bb3 with half base duration (eighth-note feel)."""
+        assert parse_note_token("Bb3:0.5") == ("bb", 3, 0.5)
+
+    def test_parse_note_token_dotted_form(self):
+        """Dotted multipliers like ``E4:1.5`` are accepted as-is."""
+        assert parse_note_token("E4:1.5") == ("e", 4, 1.5)
+
+    def test_parse_note_token_zero_multiplier_clamps_to_one(self):
+        """``:0`` would give a 0-length tone -- silently clamp to 1.0 so a
+        bad tune doesn't produce silent tokens."""
+        assert parse_note_token("C5:0") == ("c", 5, 1.0)
+
+    def test_parse_note_token_leading_dot_in_multiplier(self):
+        """``:.5`` is a valid shorthand for half (no leading zero)."""
+        assert parse_note_token("F4:.5") == ("f", 4, 0.5)
 
     def test_parse_note_token_octave_range(self):
         """Test parsing all valid octaves."""
         for octave in range(9):  # 0-8
             result = parse_note_token(f"A{octave}")
-            assert result == ("a", octave)
+            assert result == ("a", octave, 1.0)
 
     def test_parse_note_token_invalid_note(self):
         """Test returns None for invalid note."""
@@ -149,54 +173,91 @@ class TestExtractToneTokens:
 
     def test_extract_single_token(self):
         """Test extracting single tone token."""
-        tokens, text = extract_tone_tokens("$C4 Hello world")
+        tokens, text, _trailing = extract_tone_tokens("$C4 Hello world")
         assert tokens == ["C4"]
         assert text == "Hello world"
 
     def test_extract_multiple_tokens(self):
         """Test extracting multiple tone tokens."""
-        tokens, text = extract_tone_tokens("$C4 $E4 $G4 Hello")
+        tokens, text, _trailing = extract_tone_tokens("$C4 $E4 $G4 Hello")
         assert tokens == ["C4", "E4", "G4"]
         assert text == "Hello"
 
     def test_extract_no_tokens(self):
         """Test text without tone tokens."""
-        tokens, text = extract_tone_tokens("Hello world")
+        tokens, text, _trailing = extract_tone_tokens("Hello world")
         assert tokens == []
         assert text == "Hello world"
 
     def test_extract_sharp_token(self):
         """Test extracting sharp note token."""
-        tokens, text = extract_tone_tokens("$F#4 Alert")
+        tokens, text, _trailing = extract_tone_tokens("$F#4 Alert")
         assert tokens == ["F#4"]
         assert text == "Alert"
 
     def test_extract_flat_token(self):
         """Test extracting flat note token."""
-        tokens, text = extract_tone_tokens("$Bb3 Warning")
+        tokens, text, _trailing = extract_tone_tokens("$Bb3 Warning")
         assert tokens == ["Bb3"]
         assert text == "Warning"
 
+    def test_extract_token_with_duration_multiplier(self):
+        """``$C5:4`` preserves the ``:4`` suffix in the returned token so
+        downstream synthesis applies the multiplier."""
+        tokens, text, _trailing = extract_tone_tokens("$G4 $E4 $C5:4 Hello")
+        assert tokens == ["G4", "E4", "C5:4"]
+        assert text == "Hello"
+
+    def test_extract_token_with_fractional_multiplier(self):
+        tokens, text, _trailing = extract_tone_tokens("$Eb4:.5 Done.")
+        assert tokens == ["Eb4:.5"]
+        assert text == "Done."
+
+    def test_extract_trailing_tokens(self):
+        """Outro pattern: leading tones, speech, trailing tones."""
+        leading, text, trailing = extract_tone_tokens(
+            "$E4 $G4 $C5 Hello world. $C5 $G4 $E4"
+        )
+        assert leading == ["E4", "G4", "C5"]
+        assert text == "Hello world."
+        assert trailing == ["C5", "G4", "E4"]
+
+    def test_extract_trailing_only(self):
+        """Just trailing tones with no leading: speech followed by chord."""
+        leading, text, trailing = extract_tone_tokens("Done. $C5 $G4")
+        assert leading == []
+        assert text == "Done."
+        assert trailing == ["C5", "G4"]
+
+    def test_extract_does_not_consume_middle_tones(self):
+        """``$Note`` tokens embedded mid-body must NOT be treated as
+        trailing tones -- only a sequence at the very end qualifies.
+        Here ``$G4`` is followed by ``omega`` so it stays in the body."""
+        leading, text, trailing = extract_tone_tokens("$E4 alpha $G4 omega")
+        assert leading == ["E4"]
+        assert text == "alpha $G4 omega"
+        assert trailing == []
+
     def test_extract_preserves_remaining_text(self):
         """Test remaining text is preserved."""
-        tokens, text = extract_tone_tokens("$A4 Important message here")
+        tokens, text, _trailing = extract_tone_tokens("$A4 Important message here")
         assert text == "Important message here"
 
     def test_extract_empty_string(self):
         """Test empty string."""
-        tokens, text = extract_tone_tokens("")
+        tokens, text, _trailing = extract_tone_tokens("")
         assert tokens == []
         assert text == ""
 
     def test_extract_only_token(self):
         """Test string that is only a token."""
-        tokens, text = extract_tone_tokens("$G4")
+        tokens, text, _trailing = extract_tone_tokens("$G4")
         assert tokens == ["G4"]
         assert text == ""
 
     def test_extract_whitespace_handling(self):
         """Test whitespace is stripped from remaining text."""
-        tokens, text = extract_tone_tokens("$E4    Hello  ")
+        tokens, text, _trailing = extract_tone_tokens("$E4    Hello  ")
         assert text == "Hello"
 
 
@@ -345,7 +406,7 @@ class TestParseNoteTokenEdgeCases:
     def test_parse_note_token_with_trailing_text(self):
         """Test note with trailing text."""
         result = parse_note_token("C4hello")
-        assert result == ("c", 4)
+        assert result == ("c", 4, 1.0)
 
 
 class TestExtractToneTokensEdgeCases:
@@ -353,13 +414,13 @@ class TestExtractToneTokensEdgeCases:
 
     def test_extract_token_mid_text(self):
         """Test tokens not at start are not extracted."""
-        tokens, text = extract_tone_tokens("Hello $C4 world")
+        tokens, text, _trailing = extract_tone_tokens("Hello $C4 world")
         assert tokens == []
         assert text == "Hello $C4 world"
 
     def test_extract_consecutive_tokens(self):
         """Test consecutive tokens without spaces."""
-        tokens, text = extract_tone_tokens("$C4$E4 Hello")
+        tokens, text, _trailing = extract_tone_tokens("$C4$E4 Hello")
         assert "C4" in tokens
 
 
@@ -411,6 +472,116 @@ class TestGetOutroSound:
                 assert "outro" in str(path)
             finally:
                 player._outro_sound_path = original
+
+
+class TestToneRulesIntegration:
+    """get_intro_sound / get_outro_sound / render_interpretation_cue consult
+    tone_rules when given queue context.
+
+    The rendered WAVs go through synthesize routines that hit disk, so we
+    patch ``generate_combined_tones_from_tokens`` and ``synthesize_note_cue``
+    to observe *which notes* were passed -- the file path itself doesn't
+    matter for these tests."""
+
+    def test_intro_uses_per_queue_rule_when_present(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "intro",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["A4", "B4", "C5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_intro_sound(queue="compass-docs")
+            assert mock_gen.call_args.args[0] == ["A4", "B4", "C5"]
+
+    def test_intro_falls_back_to_global_when_no_rule(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tones": {"intro": ["E4", "G4", "C5"], "outro": ["C5", "G4", "E4"]},
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_intro_sound(queue="unrelated-queue")
+            assert mock_gen.call_args.args[0] == ["E4", "G4", "C5"]
+
+    def test_outro_uses_per_queue_rule(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "outro",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["G5", "E5", "C5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_outro_sound(queue="compass-docs")
+            assert mock_gen.call_args.args[0] == ["G5", "E5", "C5"]
+
+    def test_cue_uses_per_queue_interp_rule(self, tmp_path):
+        """A queue + interpretation rule for SUCCESS overrides the built-in
+        SUCCESS tune for utterances in that queue."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "cue",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": "SUCCESS",
+                        "notes": ["E5", "G5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("SUCCESS", queue="compass-docs")
+            # synthesize_note_cue gets a spec of (note, octave, seconds).
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("e", 5), ("g", 5)]
+
+    def test_cue_falls_back_to_builtin_when_no_rule_matches(self, tmp_path):
+        """No queue rule -> built-in SUCCESS tune (Eb3, G#3)."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("SUCCESS", queue="unrelated")
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("eb", 3), ("g#", 3)]
+
+    def test_cue_with_queue_only_rule_does_not_match_when_interp_set(self, tmp_path):
+        """A queue-only cue rule has score 2; a built-in interpretation
+        resolution has no score (always-applies fallback). Per the
+        resolver, queue-only cue rule still wins -- it explicitly says
+        "any interpretation in this queue uses this tune"."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "cue",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["A4", "B4"],
+                    },
+                ]
+            })
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("ERROR", queue="compass-docs")
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("a", 4), ("b", 4)]
 
 
 class TestPlayAudio:
@@ -515,43 +686,270 @@ class TestShouldAnnounceIntro:
 
 
 class TestBuildSessionScript:
-    """Tests for build_session_script function."""
+    """Tests for build_session_script function.
 
-    @patch("speeker.player.get_queue_label")
-    def test_build_session_script_single_message_only_session(self, mock_label):
-        """Test script for single message in only session."""
-        mock_label.return_value = "Project X"
-        items = [{"text": "Hello world", "created_at": "2024-01-01 12:00:00"}]
+    The function now produces exactly one line per item -- no batch header,
+    no per-item "First:/Next:" framing. That framing buried leading $Note
+    tokens so the TTS read them as letters ("EEB 4").
+    """
 
+    @staticmethod
+    def _recent_ts() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_single_message_only_session(self):
+        """Single item -> single line, item text only."""
+        items = [{"text": "Hello world", "created_at": self._recent_ts()}]
         script = build_session_script("session1", items, is_only_session=True)
+        assert script == ["Hello world"]
 
-        assert any("Hello world" in line for line in script)
-        assert not any("there is 1 message" in line.lower() for line in script)
-
-    @patch("speeker.player.get_queue_label")
-    def test_build_session_script_multiple_messages(self, mock_label):
-        """Test script for multiple messages."""
-        mock_label.return_value = "Project X"
+    def test_no_count_header_for_multiple_messages(self):
+        """The 'For queue X, there are N messages' header is gone."""
+        ts = self._recent_ts()
         items = [
-            {"text": "First message", "created_at": "2024-01-01 12:00:00"},
-            {"text": "Second message", "created_at": "2024-01-01 12:01:00"},
+            {"text": "First message", "created_at": ts},
+            {"text": "Second message", "created_at": ts},
+        ]
+        script = build_session_script("session1", items, is_only_session=True)
+        # One line per item, no header.
+        assert len(script) == 2
+        assert all("message" not in line.lower() or line.startswith("First") or line.startswith("Second")
+                   for line in script)
+        # No count phrasing anywhere.
+        assert not any("there are" in line.lower() for line in script)
+        assert not any("there is" in line.lower() for line in script)
+
+    def test_no_first_next_framing(self):
+        """No 'First, ...' / 'Next: ...' / 'Last: ...' prefixes on items."""
+        ts = self._recent_ts()
+        items = [
+            {"text": "alpha", "created_at": ts},
+            {"text": "beta", "created_at": ts},
+            {"text": "gamma", "created_at": ts},
+        ]
+        script = build_session_script("session1", items, is_only_session=True)
+        # Each line is exactly the item's text (no time_ago for recent ts).
+        assert script == ["alpha", "beta", "gamma"]
+
+    def test_no_count_header_when_not_only_session(self):
+        """A session that isn't the only one no longer gets a count header."""
+        items = [{"text": "Test", "created_at": self._recent_ts()}]
+        script = build_session_script("session1", items, is_only_session=False)
+        assert script == ["Test"]
+
+
+class TestBuildSessionScriptAutoLabel:
+    """Auto-label behavior in build_session_script.
+
+    These tests use ``relative_time`` returning None (i.e., recent timestamps)
+    so the assertions can pin the exact line shape without the "From N minutes
+    ago: ..." phrase getting interleaved.
+    """
+
+    @staticmethod
+    def _recent_ts() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_single_message_with_auto_label_prefix(self):
+        """The single-message-only-session branch prepends the prefix + period."""
+        items = [{"text": "Claude finished", "created_at": self._recent_ts()}]
+        script = build_session_script(
+            "compass-docs", items, is_only_session=True,
+            auto_label_prefix="$Eb4 compass docs",
+        )
+        assert script == ["$Eb4 compass docs. Claude finished"]
+
+    def test_single_message_without_prefix_uses_bare_text(self):
+        """No prefix -> behavior is the existing bare-text speak."""
+        items = [{"text": "Claude finished", "created_at": self._recent_ts()}]
+        script = build_session_script(
+            "compass-docs", items, is_only_session=True, auto_label_prefix=None,
+        )
+        assert script == ["Claude finished"]
+
+    def test_text_already_tone_prefixed_skips_auto_label(self):
+        """If caller already added a $Note prefix, do not double-label."""
+        items = [{
+            "text": "$Eb4 compass docs. Summary line.",
+            "created_at": self._recent_ts(),
+        }]
+        script = build_session_script(
+            "compass-docs", items, is_only_session=True,
+            auto_label_prefix="$Eb4 compass docs",
+        )
+        # Untouched -- no duplicate prefix.
+        assert script == ["$Eb4 compass docs. Summary line."]
+
+    def test_auto_label_only_first_bare_item_in_session(self):
+        """In a multi-bare-item session, only the first item gets the prefix."""
+        ts = self._recent_ts()
+        items = [
+            {"text": "one", "created_at": ts},
+            {"text": "two", "created_at": ts},
+            {"text": "three", "created_at": ts},
+        ]
+        script = build_session_script(
+            "compass-docs", items, is_only_session=True,
+            auto_label_prefix="$Eb4 compass docs",
+        )
+        # Project context is established once, then subsequent items speak bare.
+        assert script == [
+            "$Eb4 compass docs. one",
+            "two",
+            "three",
         ]
 
-        script = build_session_script("session1", items, is_only_session=True)
+    def test_caller_prefixed_item_keeps_tone_at_line_start(self):
+        """REGRESSION: tone token must remain at line-start so the player's
+        ``extract_tone_tokens`` regex (anchored to ``^\\s*\\$``) can match
+        it. Previously, multi-message batches prepended ``Next: `` which
+        buried the token mid-line; the TTS then read ``$Eb4`` as the
+        letters 'EEB 4'."""
+        ts = self._recent_ts()
+        items = [
+            {"text": "$Eb4 progress reporter. First summary.", "created_at": ts},
+            {"text": "$Eb4 progress reporter. Second summary.", "created_at": ts},
+            {"text": "$Eb4 progress reporter. Third summary.", "created_at": ts},
+        ]
+        script = build_session_script(
+            "progress-reporter", items, is_only_session=True,
+            auto_label_prefix="$Eb4 progress reporter",
+        )
+        for i, line in enumerate(script):
+            assert line.lstrip().startswith("$Eb4"), (
+                f"line {i} should start with $Eb4 so the tone is played; got: {line!r}"
+            )
+            assert not line.startswith("Next"), (
+                f"no 'Next:' framing should be added; got: {line!r}"
+            )
+            assert not line.startswith("First"), (
+                f"no 'First:' framing should be added; got: {line!r}"
+            )
 
-        assert any("2 messages" in line for line in script)
-        assert any("First" in line for line in script)
-        assert any("Last" in line for line in script)
+    def test_caller_prefixed_item_consumes_label_slot_for_following_bare(self):
+        """A caller-prefixed item establishes project context, so a following
+        bare item in the same session does NOT receive the auto-label."""
+        ts = self._recent_ts()
+        items = [
+            {"text": "$Eb4 progress reporter. First summary.", "created_at": ts},
+            {"text": "plain followup", "created_at": ts},
+        ]
+        script = build_session_script(
+            "progress-reporter", items, is_only_session=True,
+            auto_label_prefix="$Eb4 progress reporter",
+        )
+        assert script == [
+            "$Eb4 progress reporter. First summary.",
+            "plain followup",
+        ]
 
-    @patch("speeker.player.get_queue_label")
-    def test_build_session_script_not_only_session(self, mock_label):
-        """Test script for session when multiple sessions exist."""
-        mock_label.return_value = "Project X"
-        items = [{"text": "Test", "created_at": "2024-01-01 12:00:00"}]
 
-        script = build_session_script("session1", items, is_only_session=False)
+class TestComputeAutoLabelPrefix:
+    """Tests for the auto-label decision (time-gap + context-switch logic)."""
 
-        assert any("1 message" in line for line in script)
+    @patch("speeker.player.get_auto_label_config")
+    def test_disabled_in_config_returns_none(self, mock_cfg):
+        mock_cfg.return_value = {"enabled": False, "quiet_threshold_seconds": 120}
+        result = compute_auto_label_prefix("compass-docs", None, None)
+        assert result is None
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_default_queue_returns_none(self, mock_cfg):
+        """No title for the unnamed/default queue -> no prefix ever."""
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix("default", None, None)
+        assert result is None
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_first_time_returns_prefix(self, mock_cfg):
+        """No prior utterance -> label this one.
+
+        The literal word "project" precedes the title for clarity --
+        a short, single-word title would otherwise be hard to distinguish
+        from the start of the message body.
+        """
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix("compass-docs", None, None)
+        assert result == "$Eb4 project compass docs"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_recent_same_queue_returns_none(self, mock_cfg):
+        """Burst from the same queue -> no relabel."""
+        from datetime import datetime, timezone
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix(
+            "compass-docs", datetime.now(timezone.utc), "compass-docs",
+        )
+        assert result is None
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_recent_different_queue_returns_prefix(self, mock_cfg):
+        """Context switch always relabels, even within the threshold window."""
+        from datetime import datetime, timezone
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix(
+            "compass-docs", datetime.now(timezone.utc), "audio-speeker",
+        )
+        assert result == "$Eb4 project compass docs"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_old_same_queue_returns_prefix(self, mock_cfg):
+        """Past the quiet threshold -> relabel even on same queue."""
+        from datetime import datetime, timedelta, timezone
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        long_ago = datetime.now(timezone.utc) - timedelta(seconds=600)
+        result = compute_auto_label_prefix("compass-docs", long_ago, "compass-docs")
+        assert result == "$Eb4 project compass docs"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_custom_tone_is_used(self, mock_cfg):
+        """The tone is configurable -- a different note travels through."""
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$G3"}
+        result = compute_auto_label_prefix("compass-docs", None, None)
+        assert result == "$G3 project compass docs"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_display_name_override_replaces_derived_title(self, mock_cfg):
+        """Caller-supplied display_name beats the hyphen-to-space derivation.
+
+        This is the lever for ugly queue ids like 'e2e-stt-1779972451' that
+        would otherwise be voiced as a string of digits. The caller passes
+        a sensible spoken title and the player uses it verbatim.
+        """
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix(
+            "e2e-stt-1779972451", None, None,
+            display_name_override="end to end test",
+        )
+        assert result == "$Eb4 project end to end test"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_display_name_override_works_for_default_queue(self, mock_cfg):
+        """Even the 'default' queue gets a spoken title when override is supplied.
+
+        Without override, the default queue suppresses the auto-label entirely
+        (no meaningful title to derive). An explicit display_name overrides
+        that policy -- callers should be able to label any queue they want.
+        """
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix(
+            "default", None, None,
+            display_name_override="my custom label",
+        )
+        assert result == "$Eb4 project my custom label"
+
+    @patch("speeker.player.get_auto_label_config")
+    def test_display_name_override_empty_string_falls_through(self, mock_cfg):
+        """An empty/whitespace display_name doesn't override; derivation runs."""
+        mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
+        result = compute_auto_label_prefix(
+            "compass-docs", None, None,
+            display_name_override=None,
+        )
+        # Same as the no-override path.
+        assert result == "$Eb4 project compass docs"
 
 
 class TestAcquireLock:
@@ -799,6 +1197,43 @@ class TestGenerateTTS:
             path = player.generate_tts("Hello world", verbose=False)
         assert path is None
 
+    def test_generate_tts_calls_apply_effects_with_sample_rate(self, tmp_path):
+        """The effects hook sits between the speed resample and the
+        int16 clip in generate_tts. Verify apply_effects is invoked with
+        the engine's sample rate. The recording engine returns 16000."""
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec), \
+             patch("speeker.effects.apply_effects") as mock_fx:
+            # Echo the input array back unchanged.
+            mock_fx.side_effect = lambda audio, sr, **kw: audio
+            path = player.generate_tts("Hello world", verbose=False)
+        assert path is not None
+        assert mock_fx.called
+        _audio_arg, sr_arg = mock_fx.call_args.args
+        assert sr_arg == 16000
+        # No explicit preset_override -> apply_effects gets None and
+        # falls back to the saved config.
+        assert mock_fx.call_args.kwargs.get("preset_override") is None
+        path.unlink()
+
+    def test_generate_tts_threads_effects_preset_override(self, tmp_path):
+        """Per-utterance override (used by /api/effects/try) must reach
+        apply_effects via the preset_override kwarg, not the saved config."""
+        from speeker import player
+        rec = _PlayerRecordingEngine()
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+             patch.object(player, "get_engine", return_value=rec), \
+             patch("speeker.effects.apply_effects") as mock_fx:
+            mock_fx.side_effect = lambda audio, sr, **kw: audio
+            path = player.generate_tts(
+                "Hello", verbose=False, effects_preset="natural",
+            )
+        assert path is not None
+        assert mock_fx.call_args.kwargs["preset_override"] == "natural"
+        path.unlink()
+
 
 class TestSpeakTextPlayer:
     """Tests for speak_text function in player module."""
@@ -821,17 +1256,29 @@ class TestSpeakTextPlayer:
     @patch("speeker.player.play_tone_tokens")
     @patch("speeker.player.extract_tone_tokens")
     def test_speak_text_with_tones(self, mock_extract, mock_play_tone):
-        """Test speak_text handles tone tokens."""
+        """speak_text passes the tone-duration override through to
+        play_tone_tokens. None (the default) means "use play_tone_tokens'
+        own default" -- the 0.8s used for $Note prefix tones before TTS."""
         from speeker.player import speak_text as player_speak_text
 
-        mock_extract.return_value = (["C4", "E4"], "Hello")
+        mock_extract.return_value = (["C4", "E4"], "Hello", [])
 
         with patch("speeker.player.generate_tts") as mock_gen:
             mock_gen.return_value = None
-
             player_speak_text("$C4 $E4 Hello", verbose=False)
 
-            mock_play_tone.assert_called_once_with(["C4", "E4"], False)
+        mock_play_tone.assert_called_once_with(["C4", "E4"], False, duration=None)
+
+    @patch("speeker.player.play_tone_tokens")
+    @patch("speeker.player.extract_tone_tokens")
+    def test_speak_text_threads_tone_duration_override(self, mock_extract, mock_play_tone):
+        """The /api/tones/play preview path supplies tone_duration via
+        metadata; speak_text must thread it down to play_tone_tokens."""
+        from speeker.player import speak_text as player_speak_text
+
+        mock_extract.return_value = (["G4", "E4", "C5"], "", [])
+        player_speak_text("$G4 $E4 $C5", verbose=False, tone_duration=0.18)
+        mock_play_tone.assert_called_once_with(["G4", "E4", "C5"], False, duration=0.18)
 
     @patch("speeker.player.generate_tts")
     def test_speak_text_tts_failure(self, mock_gen):
@@ -1021,29 +1468,30 @@ class TestAcquireLockRunning:
 class TestBuildSessionScriptEdgeCases:
     """Edge cases for build_session_script."""
 
-    @patch("speeker.player.get_queue_label")
-    def test_build_session_script_three_messages(self, mock_label):
-        """Test script for three messages uses 'Next'."""
-        mock_label.return_value = "Project X"
+    @staticmethod
+    def _recent_ts() -> str:
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    def test_three_messages_speak_verbatim_no_framing(self):
+        """Three bare items -> three lines, no 'First/Middle/Last' framing."""
+        ts = self._recent_ts()
         items = [
-            {"text": "First", "created_at": "2024-01-01 12:00:00"},
-            {"text": "Middle", "created_at": "2024-01-01 12:01:00"},
-            {"text": "Third", "created_at": "2024-01-01 12:02:00"},
+            {"text": "First", "created_at": ts},
+            {"text": "Middle", "created_at": ts},
+            {"text": "Third", "created_at": ts},
         ]
-
         script = build_session_script("session1", items, is_only_session=True)
+        assert script == ["First", "Middle", "Third"]
+        # Nothing introduces these with "Next" / "Last" framing.
+        assert not any(line.startswith("Next") for line in script)
+        assert not any(line.startswith("Last") for line in script)
 
-        assert any("Next" in line for line in script)
-
-    @patch("speeker.player.get_queue_label")
-    def test_build_session_script_single_not_only(self, mock_label):
-        """Test script for single message when other sessions exist."""
-        mock_label.return_value = "Project X"
-        items = [{"text": "Solo", "created_at": "2024-01-01 12:00:00"}]
-
+    def test_single_not_only_session_no_count_header(self):
+        """A session that isn't the only one no longer gets a count header."""
+        items = [{"text": "Solo", "created_at": self._recent_ts()}]
         script = build_session_script("session1", items, is_only_session=False)
-
-        assert any("1 message" in line for line in script)
+        assert script == ["Solo"]
 
 
 class TestProcessQueueAdvanced:

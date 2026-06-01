@@ -114,6 +114,18 @@ def player_lock_path() -> Path:
     return runtime_dir() / "player.lock"
 
 
+def restart_sentinel_path() -> Path:
+    """Path of the marker the API uses to flag "daemon restart needed".
+
+    Written by ``/api/*`` endpoints that change something cached at the
+    daemon's startup (polly profile, model idle timeout, anything edited
+    in config.json outside the UI). The daemon deletes the file when it
+    starts. GET ``/api/restart-needed`` reports whether it exists so the
+    top tab bar can show a pill.
+    """
+    return runtime_dir() / "restart_needed"
+
+
 # -- Helpers -----------------------------------------------------------------
 
 def ensure_dir(path: Path) -> Path:
