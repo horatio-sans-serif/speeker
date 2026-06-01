@@ -498,31 +498,43 @@ HTML_TEMPLATE = """
             font-size: 0.92em;
         }
         .effect-card-actions { display: flex; gap: 4px; }
+        /* One parameter per row so each slider gets the full editor
+           width. The earlier 220px auto-fit grid squeezed sliders to
+           ~60px wide which made them impossible to use with precision.
+           Each row is: label | wide slider | numeric input. */
         .effect-params {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 6px 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 8px;
         }
         .effect-param {
             display: grid;
-            grid-template-columns: 90px 1fr 70px;
-            gap: 6px;
+            grid-template-columns: 160px 1fr 88px;
+            gap: 12px;
             align-items: center;
             font-size: 0.85em;
         }
         .effect-param label {
-            color: var(--text-3);
+            color: var(--text-2);
             font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
             font-size: 0.85em;
             text-align: right;
             cursor: help;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .effect-param input[type="range"] { width: 100%; }
+        .effect-param input[type="range"] {
+            width: 100%;
+            accent-color: var(--accent);
+        }
         .effect-param .param-num {
             width: 100%;
+            box-sizing: border-box;
             font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
-            font-size: 0.82em;
-            padding: 2px 6px;
+            font-size: 0.85em;
+            padding: 4px 8px;
             border-radius: 4px;
             background: var(--surface-3);
             border: 1px solid var(--border);
@@ -3179,6 +3191,15 @@ function EffectsSection() {
     const [status, setStatus] = useState('');
     const [plugins, setPlugins] = useState({});  // {pluginName: [{name, type, default, min, max, step}, ...]}
     const [editorOpen, setEditorOpen] = useState(false);
+    // Page-local sample phrase persisted so users can A/B presets on
+    // text they actually care about without retyping. Mirrors the
+    // PerQueueSection sample-phrase pattern.
+    const [sampleText, setSampleText] = useState(() =>
+        localStorage.getItem('speeker.effectsSample') || 'The quick brown fox jumps over the lazy dog.'
+    );
+    useEffect(() => {
+        localStorage.setItem('speeker.effectsSample', sampleText);
+    }, [sampleText]);
 
     const reloadPresets = useCallback(() => {
         fetch('/api/effects').then(r => r.json()).then(d => {
@@ -3219,13 +3240,24 @@ function EffectsSection() {
     };
 
     const trySample = async () => {
+        const text = sampleText.trim();
+        if (!text) {
+            setStatus('Type a sample phrase first.');
+            setTimeout(() => setStatus(''), 2000);
+            return;
+        }
         setStatus('Playing sample...');
         try {
-            await fetch('/api/effects/try', {
+            const resp = await fetch('/api/effects/try', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ preset: selected }),
+                body: JSON.stringify({ preset: selected, text }),
             });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                setStatus('Error: ' + (err.detail || resp.statusText));
+                return;
+            }
             setStatus('Sample queued.');
             setTimeout(() => setStatus(''), 3000);
         } catch (e) {
@@ -3255,6 +3287,16 @@ function EffectsSection() {
                     {description}
                 </div>
             )}
+            <div className="field-row" style={{ marginTop: 4 }}>
+                <label>Sample text</label>
+                <input
+                    type="text"
+                    value={sampleText}
+                    onChange={e => setSampleText(e.target.value)}
+                    placeholder="Phrase the Try button will speak"
+                    onKeyDown={e => { if (e.key === 'Enter') trySample(); }}
+                />
+            </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button className="btn-try" onClick={trySample}>Try sample</button>
                 <button
@@ -3428,6 +3470,20 @@ function PresetEditor({ presets, plugins, onPresetsChanged, selectedName, onSele
             return;
         }
         const data = await resp.json();
+        // Update local editor state IMMEDIATELY so a save click after
+        // a quick slider tweak targets the new clone, not the original.
+        // Without this, there's a race: onSelectPreset triggers a parent
+        // re-render -> useEffect refetches the new preset -> only THEN
+        // does origName flip. A user editing in that window would have
+        // their Save go to the original's URL (404 for builtins, or
+        // overwrite the source for customs).
+        setEditName(data.name);
+        setOrigName(data.name);
+        // Mark the clone's chain as the new baseline so subsequent
+        // edits are diffed against THIS state, not the source preset.
+        setOrigChain(JSON.parse(JSON.stringify(chain)));
+        setIsBuiltin(false);
+        setRenameTo('');
         setStatus(data.message || 'Created.');
         onPresetsChanged();
         onSelectPreset(data.name);
@@ -3644,6 +3700,37 @@ function SSMLGuide({ engines }) {
     const [ssml, setSsml] = useState(DEFAULT_SSML);
     const [lint, setLint] = useState(null);
     const [status, setStatus] = useState('');
+    // Polly is the only engine that honors SSML, so the voice picker
+    // here is locked to Polly voices. Persisted so the user's last
+    // pick survives a reload.
+    const pollyVoices = useMemo(() => {
+        const polly = engines.find(e => e.name === 'polly');
+        return polly ? polly.voices : [];
+    }, [engines]);
+    const [voice, setVoice] = useState(
+        () => localStorage.getItem('speeker.ssmlVoice') || ''
+    );
+    useEffect(() => {
+        if (voice) localStorage.setItem('speeker.ssmlVoice', voice);
+    }, [voice]);
+    // When the engines list loads and the user hasn't picked yet, seed
+    // with the first Polly voice so the Try button has a concrete value
+    // to send (the backend would otherwise fall back to Joanna).
+    useEffect(() => {
+        if (!voice && pollyVoices.length > 0) {
+            setVoice(pollyVoices[0].id);
+        }
+    }, [pollyVoices, voice]);
+    // Polly variant. Default to 'neural' because it honors <prosody>;
+    // the user's globally-configured variant might be 'generative' (which
+    // silently drops <prosody>) so we don't blindly inherit it here --
+    // the SSML editor is the place where prosody-honoring is the point.
+    const [pollyEngine, setPollyEngine] = useState(
+        () => localStorage.getItem('speeker.ssmlPollyEngine') || 'neural'
+    );
+    useEffect(() => {
+        localStorage.setItem('speeker.ssmlPollyEngine', pollyEngine);
+    }, [pollyEngine]);
 
     // Live lint with a small debounce so we don't hammer the server on
     // every keystroke. 400ms is short enough to feel responsive without
@@ -3665,10 +3752,12 @@ function SSMLGuide({ engines }) {
     const tryIt = async () => {
         setStatus('Speaking...');
         try {
+            const body = { ssml, engine: 'polly', polly_engine: pollyEngine };
+            if (voice) body.voice = voice;
             const resp = await fetch('/api/ssml/try', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ssml }),
+                body: JSON.stringify(body),
             });
             if (!resp.ok) {
                 const err = await resp.json().catch(() => ({}));
@@ -3710,7 +3799,31 @@ function SSMLGuide({ engines }) {
                 )}
             </div>
 
-            <div style={{ display: 'flex', gap: 10, marginTop: 14, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 10, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                <label style={{ color: 'var(--text-2)', fontSize: '0.9em' }}>Voice</label>
+                <select
+                    value={voice}
+                    onChange={e => setVoice(e.target.value)}
+                    style={{ flex: '0 0 200px' }}
+                    title="Polly voice used by Try"
+                >
+                    {pollyVoices.length === 0 && <option value="">(no Polly voices)</option>}
+                    {pollyVoices.map(v => (
+                        <option key={v.id} value={v.id}>{v.id}</option>
+                    ))}
+                </select>
+                <label style={{ color: 'var(--text-2)', fontSize: '0.9em' }}>Polly engine</label>
+                <select
+                    value={pollyEngine}
+                    onChange={e => setPollyEngine(e.target.value)}
+                    style={{ flex: '0 0 140px' }}
+                    title="generative ignores <prosody>; neural honors rate and pitch; long-form supports the full grammar"
+                >
+                    <option value="neural">neural</option>
+                    <option value="standard">standard</option>
+                    <option value="long-form">long-form</option>
+                    <option value="generative">generative</option>
+                </select>
                 <button
                     className="btn"
                     onClick={tryIt}
@@ -3719,6 +3832,11 @@ function SSMLGuide({ engines }) {
                 >Try it</button>
                 <span className="save-success">{status}</span>
             </div>
+            {pollyEngine === 'generative' && /<prosody/i.test(ssml) && (
+                <div className="ssml-warning" style={{ marginTop: 8 }}>
+                    Heads up: Polly's <code>generative</code> engine does not honor <code>&lt;prosody&gt;</code> rate/pitch. Switch to <code>neural</code>, <code>standard</code>, or <code>long-form</code> to hear the change.
+                </div>
+            )}
 
             <table style={{ marginTop: 22 }}>
                 <thead>
@@ -4980,10 +5098,18 @@ _POLLY_SSML_TAGS: set[str] = {
 
 
 class SSMLTry(BaseModel):
-    """Try a chunk of SSML through speeker -> Polly."""
+    """Try a chunk of SSML through speeker -> Polly.
+
+    ``polly_engine`` is the Polly variant: neural / standard / long-form /
+    generative. SSML features differ between variants -- notably the
+    generative engine silently drops ``<prosody>`` rate/pitch, so this
+    field lets callers route a single try through a variant that
+    honors the markup they wrote.
+    """
     ssml: str
     engine: str | None = None
     voice: str | None = None
+    polly_engine: str | None = None
 
 
 def _lint_ssml(text: str) -> dict:
@@ -5075,6 +5201,16 @@ async def api_ssml_try(body: SSMLTry):
 
     engine = body.engine or "polly"
     voice = body.voice or get_polly_config().get("voice") or "Joanna"
+    # Polly variant: caller's pick wins, else saved global, else neural
+    # as a sensible SSML-honoring default. ``generative`` is allowed but
+    # is the variant that silently drops <prosody>, so a user picking it
+    # explicitly is responsible for accepting that behavior.
+    polly_engine = body.polly_engine or get_polly_config().get("engine") or "neural"
+    if polly_engine not in _POLLY_VARIANTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown polly_engine {polly_engine!r}. Known: {', '.join(sorted(_POLLY_VARIANTS))}",
+        )
 
     # Make sure the body is wrapped in <speak>. Polly insists on it; the
     # lint already accepted both wrapped and unwrapped forms, so we
@@ -5088,15 +5224,33 @@ async def api_ssml_try(body: SSMLTry):
         "engine": engine,
         "voice": voice,
         "ssml": True,
+        "polly_engine": polly_engine,
     }
     queue_id = enqueue(text, metadata=metadata)
     start_player()
+    # Add a contextual warning if the user picked an engine that's
+    # known to ignore a tag present in their SSML.
+    extra_warnings = list(lint.get("warnings", []))
+    if polly_engine == "generative" and "<prosody" in text:
+        extra_warnings.append({
+            "message": "Polly's generative engine does not honor <prosody>; "
+                       "use neural / standard / long-form to hear rate/pitch changes.",
+        })
     return JSONResponse({
         "queue_id": queue_id,
         "engine": engine,
         "voice": voice,
-        "warnings": lint.get("warnings", []),
+        "polly_engine": polly_engine,
+        "warnings": extra_warnings,
     })
+
+
+# Polly engine variants we accept for per-utterance override. Polly itself
+# adds new variants periodically (long-form was added in 2024); keep the
+# set permissive but bounded so a typo doesn't reach boto3.
+_POLLY_VARIANTS: frozenset[str] = frozenset([
+    "neural", "standard", "long-form", "generative",
+])
 
 
 _KNOWN_ENGINES: frozenset[str] = frozenset(["polly", "pocket-tts", "kokoro"])
@@ -5666,18 +5820,26 @@ async def api_get_custom_preset(name: str):
 
 
 class EffectsTry(BaseModel):
-    """Optional preset override for a one-shot preview that doesn't touch
-    the saved configuration. When ``preset`` is omitted, the saved
-    preset is used."""
+    """One-shot preview that doesn't touch the saved configuration.
+
+    ``preset`` (optional) accepts any built-in OR custom preset name.
+    When omitted, the saved global preset is used.
+
+    ``text`` (optional) is the phrase to synthesize. When omitted,
+    falls back to the default sample phrase. Capped at 500 chars to
+    match the engine-try endpoint's anti-abuse limit.
+    """
     preset: str | None = None
+    text: str | None = None
 
 
 _EFFECTS_TRY_PHRASE = "The quick brown fox jumps over the lazy dog."
+_EFFECTS_TRY_MAX_LEN = 500
 
 
 @router.post("/api/effects/try")
 async def api_effects_try(body: EffectsTry):
-    """Enqueue a fixed phrase for immediate playback through the chain.
+    """Enqueue a phrase for immediate playback through the chain.
 
     When *preset* is supplied, the preset is attached to the queue item
     as ``metadata.effects_preset``. The daemon's ``process_queue``
@@ -5685,23 +5847,38 @@ async def api_effects_try(body: EffectsTry):
     override -- no mutation of ``config.json``, no race with the daemon's
     polling interval. When *preset* is omitted, the saved preset is used.
 
+    Custom presets (created via ``POST /api/effects/presets``) are valid
+    inputs here -- the validation uses the merged built-in + custom name
+    set so a user-saved preset can preview without first being saved as
+    the global default.
+
     Before enqueueing, the requested chain is exercised against a tiny
     zero buffer so a broken preset (e.g. unknown plugin name or bad
     parameter introduced by a hand-edit to PRESETS) returns 500 with the
     detail synchronously rather than producing silently-passthrough
-    audio inside the daemon (which is the right behavior for production
-    but unhelpful for previewing).
+    audio inside the daemon.
     """
     from .queue_db import enqueue
     from .cli import start_player
-    from .effects import apply_effects
+    from .effects import all_presets
     import numpy as np
 
     requested = body.preset
-    if requested is not None and requested not in PRESETS:
+    known_names = preset_names()  # builtin + custom merged
+    if requested is not None and requested not in known_names:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown preset {requested!r}. Known: {', '.join(preset_names())}",
+            detail=f"Unknown preset {requested!r}. Known: {', '.join(known_names)}",
+        )
+
+    # Resolve text: caller phrase wins, else the default sample. Same
+    # cap as /api/engines/try so a hostile client can't spam the queue
+    # with a megabyte of "X". Empty-after-strip falls back to default.
+    text = (body.text or "").strip() or _EFFECTS_TRY_PHRASE
+    if len(text) > _EFFECTS_TRY_MAX_LEN:
+        raise HTTPException(
+            status_code=413,
+            detail=f"text exceeds the {_EFFECTS_TRY_MAX_LEN} character limit.",
         )
 
     # Eager probe: run the chain on a 100ms-of-silence buffer. apply_effects
@@ -5711,10 +5888,11 @@ async def api_effects_try(body: EffectsTry):
     # cache means this probe is virtually free after the first call per
     # preset.
     try:
-        from .effects import _build_board, PRESETS as _PRESETS
+        from .effects import _build_board
+        presets_map = all_presets()
         probe_preset = requested or get_effects_config().get("preset", "off") or "off"
-        if probe_preset in _PRESETS and _PRESETS[probe_preset]:
-            board = _build_board(_PRESETS[probe_preset])
+        if probe_preset in presets_map and presets_map[probe_preset]:
+            board = _build_board(presets_map[probe_preset])
             if board is not None:
                 silence = np.zeros(1600, dtype=np.float32)  # 100ms @ 16kHz
                 board(silence, 16000)
@@ -5727,13 +5905,13 @@ async def api_effects_try(body: EffectsTry):
     metadata: dict[str, str] = {"queue": "default"}
     if requested is not None:
         metadata["effects_preset"] = requested
-    queue_id = enqueue(_EFFECTS_TRY_PHRASE, metadata=metadata)
+    queue_id = enqueue(text, metadata=metadata)
     start_player()
 
     saved = get_effects_config().get("preset", "off")
     return JSONResponse({
         "queue_id": queue_id,
-        "spoken": _EFFECTS_TRY_PHRASE,
+        "spoken": text,
         "preset": requested or saved,
     })
 

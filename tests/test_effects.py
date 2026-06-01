@@ -46,10 +46,15 @@ def _reset_pedalboard_warning_state():
 # Preset list / metadata
 # ---------------------------------------------------------------------------
 
-def test_preset_names_off_first_then_alphabetical_set():
+def test_preset_names_off_first_then_alphabetical_set(tmp_path, monkeypatch):
+    """All built-ins are present and ``off`` leads. Custom presets from
+    config can extend the list but never remove a built-in. Test runs
+    in an isolated SPEEKER_DIR so a user's saved custom presets don't
+    contaminate the assertion."""
+    monkeypatch.setenv("SPEEKER_DIR", str(tmp_path))
     names = effects.preset_names()
     assert names[0] == "off"
-    assert set(names) == {"off", "studio", "natural", "spacious", "telephone", "robot"}
+    assert set(names) >= {"off", "studio", "natural", "spacious", "telephone", "robot"}
 
 
 def test_every_preset_has_a_description():
