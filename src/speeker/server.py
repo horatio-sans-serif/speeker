@@ -45,13 +45,17 @@ def extract_title(request: Request) -> str | None:
 def format_with_title(text: str, title: str | None, is_ssml: bool = False) -> str:
     """Format text with optional title prefix and attention tone.
 
+    The literal word "project" precedes the title so the listener hears
+    "project compass docs" rather than just "compass docs" -- the noun cue
+    makes the category boundary obvious even when project names are short.
+
     When is_ssml is True, the title prefix is skipped: prepending spoken text
     before a <speak> root produces invalid SSML.
     """
     if is_ssml:
         return text
     if title:
-        return f"$Eb4 {title}. {text}"
+        return f"$Eb4 project {title}. {text}"
     return text
 
 

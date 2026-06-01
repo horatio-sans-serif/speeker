@@ -102,9 +102,13 @@ class TestFormatWithTitle:
     """Tests for format_with_title function."""
 
     def test_format_with_title_adds_prefix(self):
-        """Test adds title prefix with tone marker."""
+        """Test adds title prefix with tone marker.
+
+        The literal word "project" precedes the title so the listener hears
+        "project Important" rather than just "Important" -- the noun cue
+        makes the category boundary obvious."""
         result = format_with_title("Hello world", "Important")
-        assert result == "$Eb4 Important. Hello world"
+        assert result == "$Eb4 project Important. Hello world"
 
     def test_format_with_title_none_returns_original(self):
         """Test None title returns original text."""
@@ -130,7 +134,7 @@ class TestFormatWithTitle:
     def test_format_with_title_period_after_title(self):
         """Test period separates title from text."""
         result = format_with_title("text", "title")
-        assert "title. text" in result
+        assert "project title. text" in result
 
 
 class TestElideMessageCount:
@@ -457,7 +461,7 @@ class TestSpeakEndpoint:
         # Verify title was prepended
         call_args = mock_enqueue.call_args
         enqueued_text = call_args[0][0]
-        assert "$Eb4 Alert." in enqueued_text
+        assert "$Eb4 project Alert." in enqueued_text
         assert "System down" in enqueued_text
 
     @patch("speeker.server.start_player")
@@ -539,7 +543,7 @@ class TestSummarizeEndpoint:
         assert response.status_code == 200
         call_args = mock_enqueue.call_args
         enqueued_text = call_args[0][0]
-        assert "$Eb4 Update." in enqueued_text
+        assert "$Eb4 project Update." in enqueued_text
 
     @patch("speeker.server.start_player")
     @patch("speeker.server.get_pending_count")
