@@ -47,6 +47,21 @@ DEFAULT_CONFIG = {
         # Per-note duration in seconds when synthesizing intro/outro.
         "duration_seconds": 0.12,
     },
+    "tone_rules": [
+        # Per-queue / per-interpretation tune overrides. Each rule is:
+        #   {
+        #     "slot": "intro" | "outro" | "cue",
+        #     "queue": "<queue id or regex>" | null,
+        #     "queue_regex": bool,             # treat ``queue`` as a regex
+        #     "interpretation": "SUCCESS" | null,
+        #     "notes": ["E4", "G4", "C5:2"],
+        #   }
+        # Resolution at speech time scores candidate rules:
+        #   queue match -> +2, interpretation match -> +1; highest score wins.
+        # Falls back to ``tones.intro/outro`` or ``interpretations.map`` for
+        # the global defaults when no rule applies.
+        # See tone_rules.resolve_tone_notes().
+    ],
     "pronunciation": {
         # User-supplied {word: respelling} map applied during text
         # preprocessing. Whole-word (regex \b), case-insensitive. Respelling
@@ -213,6 +228,18 @@ def get_effects_config() -> dict:
     """Get the audio-effects configuration (preset name + future params)."""
     config = get_config()
     return config.get("effects", {})
+
+
+def get_tone_rules() -> list[dict]:
+    """Get the list of per-queue / per-interpretation tone rules.
+
+    Returns an empty list when none configured. Rule shape and resolution
+    semantics are documented in ``DEFAULT_CONFIG["tone_rules"]`` and
+    ``tone_rules.resolve_tone_notes``.
+    """
+    config = get_config()
+    rules = config.get("tone_rules", [])
+    return rules if isinstance(rules, list) else []
 
 
 def get_pronunciation_overrides() -> dict[str, str | dict[str, str]]:

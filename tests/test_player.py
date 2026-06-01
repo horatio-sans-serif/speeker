@@ -474,6 +474,116 @@ class TestGetOutroSound:
                 player._outro_sound_path = original
 
 
+class TestToneRulesIntegration:
+    """get_intro_sound / get_outro_sound / render_interpretation_cue consult
+    tone_rules when given queue context.
+
+    The rendered WAVs go through synthesize routines that hit disk, so we
+    patch ``generate_combined_tones_from_tokens`` and ``synthesize_note_cue``
+    to observe *which notes* were passed -- the file path itself doesn't
+    matter for these tests."""
+
+    def test_intro_uses_per_queue_rule_when_present(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "intro",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["A4", "B4", "C5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_intro_sound(queue="compass-docs")
+            assert mock_gen.call_args.args[0] == ["A4", "B4", "C5"]
+
+    def test_intro_falls_back_to_global_when_no_rule(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tones": {"intro": ["E4", "G4", "C5"], "outro": ["C5", "G4", "E4"]},
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_intro_sound(queue="unrelated-queue")
+            assert mock_gen.call_args.args[0] == ["E4", "G4", "C5"]
+
+    def test_outro_uses_per_queue_rule(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "outro",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["G5", "E5", "C5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.generate_combined_tones_from_tokens") as mock_gen:
+                mock_gen.return_value = tmp_path / "fake.wav"
+                get_outro_sound(queue="compass-docs")
+            assert mock_gen.call_args.args[0] == ["G5", "E5", "C5"]
+
+    def test_cue_uses_per_queue_interp_rule(self, tmp_path):
+        """A queue + interpretation rule for SUCCESS overrides the built-in
+        SUCCESS tune for utterances in that queue."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "cue",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": "SUCCESS",
+                        "notes": ["E5", "G5"],
+                    },
+                ]
+            })
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("SUCCESS", queue="compass-docs")
+            # synthesize_note_cue gets a spec of (note, octave, seconds).
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("e", 5), ("g", 5)]
+
+    def test_cue_falls_back_to_builtin_when_no_rule_matches(self, tmp_path):
+        """No queue rule -> built-in SUCCESS tune (Eb3, G#3)."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("SUCCESS", queue="unrelated")
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("eb", 3), ("g#", 3)]
+
+    def test_cue_with_queue_only_rule_does_not_match_when_interp_set(self, tmp_path):
+        """A queue-only cue rule has score 2; a built-in interpretation
+        resolution has no score (always-applies fallback). Per the
+        resolver, queue-only cue rule still wins -- it explicitly says
+        "any interpretation in this queue uses this tune"."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({
+                "tone_rules": [
+                    {
+                        "slot": "cue",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": None,
+                        "notes": ["A4", "B4"],
+                    },
+                ]
+            })
+            with patch("speeker.player.synthesize_note_cue") as mock_syn:
+                mock_syn.return_value = tmp_path / "fake.wav"
+                render_interpretation_cue("ERROR", queue="compass-docs")
+            spec = mock_syn.call_args.args[1]
+            assert [(n, o) for (n, o, _s) in spec] == [("a", 4), ("b", 4)]
+
+
 class TestPlayAudio:
     """Tests for play_audio function."""
 
@@ -754,10 +864,15 @@ class TestComputeAutoLabelPrefix:
 
     @patch("speeker.player.get_auto_label_config")
     def test_first_time_returns_prefix(self, mock_cfg):
-        """No prior utterance -> label this one."""
+        """No prior utterance -> label this one.
+
+        The literal word "project" precedes the title for clarity --
+        a short, single-word title would otherwise be hard to distinguish
+        from the start of the message body.
+        """
         mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
         result = compute_auto_label_prefix("compass-docs", None, None)
-        assert result == "$Eb4 compass docs"
+        assert result == "$Eb4 project compass docs"
 
     @patch("speeker.player.get_auto_label_config")
     def test_recent_same_queue_returns_none(self, mock_cfg):
@@ -777,7 +892,7 @@ class TestComputeAutoLabelPrefix:
         result = compute_auto_label_prefix(
             "compass-docs", datetime.now(timezone.utc), "audio-speeker",
         )
-        assert result == "$Eb4 compass docs"
+        assert result == "$Eb4 project compass docs"
 
     @patch("speeker.player.get_auto_label_config")
     def test_old_same_queue_returns_prefix(self, mock_cfg):
@@ -786,14 +901,14 @@ class TestComputeAutoLabelPrefix:
         mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$Eb4"}
         long_ago = datetime.now(timezone.utc) - timedelta(seconds=600)
         result = compute_auto_label_prefix("compass-docs", long_ago, "compass-docs")
-        assert result == "$Eb4 compass docs"
+        assert result == "$Eb4 project compass docs"
 
     @patch("speeker.player.get_auto_label_config")
     def test_custom_tone_is_used(self, mock_cfg):
         """The tone is configurable -- a different note travels through."""
         mock_cfg.return_value = {"enabled": True, "quiet_threshold_seconds": 120, "tone": "$G3"}
         result = compute_auto_label_prefix("compass-docs", None, None)
-        assert result == "$G3 compass docs"
+        assert result == "$G3 project compass docs"
 
     @patch("speeker.player.get_auto_label_config")
     def test_display_name_override_replaces_derived_title(self, mock_cfg):
@@ -808,7 +923,7 @@ class TestComputeAutoLabelPrefix:
             "e2e-stt-1779972451", None, None,
             display_name_override="end to end test",
         )
-        assert result == "$Eb4 end to end test"
+        assert result == "$Eb4 project end to end test"
 
     @patch("speeker.player.get_auto_label_config")
     def test_display_name_override_works_for_default_queue(self, mock_cfg):
@@ -823,7 +938,7 @@ class TestComputeAutoLabelPrefix:
             "default", None, None,
             display_name_override="my custom label",
         )
-        assert result == "$Eb4 my custom label"
+        assert result == "$Eb4 project my custom label"
 
     @patch("speeker.player.get_auto_label_config")
     def test_display_name_override_empty_string_falls_through(self, mock_cfg):
@@ -834,7 +949,7 @@ class TestComputeAutoLabelPrefix:
             display_name_override=None,
         )
         # Same as the no-override path.
-        assert result == "$Eb4 compass docs"
+        assert result == "$Eb4 project compass docs"
 
 
 class TestAcquireLock:

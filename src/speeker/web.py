@@ -19,10 +19,13 @@ from .config import (
     get_effects_config,
     get_polly_config,
     get_pronunciation_overrides,
+    get_tone_rules,
     get_tones_config,
     save_config,
 )
 from .effects import PRESET_DESCRIPTIONS, PRESETS, preset_names
+from .interpretations import interpretation_names
+from .tone_rules import normalize_rule, validate_rule
 from .queue_db import (
     get_all_sessions,
     get_currently_playing,
@@ -287,6 +290,39 @@ HTML_TEMPLATE = """
             cursor: not-allowed;
         }
         .play-btn svg { width: 15px; height: 15px; fill: currentColor; }
+
+        /* Download glyph -- a circular ghost button matching .play-btn's
+           footprint so the two affordances align cleanly side by side. */
+        .download-btn {
+            background: transparent;
+            color: var(--text-3);
+            border: 1px solid var(--border-strong);
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            text-decoration: none;
+            transition: background 0.12s, color 0.12s, border-color 0.12s;
+        }
+        .download-btn:hover {
+            color: var(--accent);
+            border-color: var(--accent-line);
+            background: var(--accent-soft);
+        }
+        .download-btn.disabled,
+        .download-btn[aria-disabled="true"] {
+            color: var(--text-mute);
+            border-color: var(--border);
+            cursor: not-allowed;
+            pointer-events: none;
+        }
+        .download-btn svg { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 2; }
+        .history-table .download-btn { width: 28px; height: 28px; }
+        .history-table .download-btn svg { width: 13px; height: 13px; }
         .time {
             color: var(--text-3);
             font-size: 0.88em;
@@ -541,15 +577,25 @@ HTML_TEMPLATE = """
         .save-success { color: var(--success); font-size: 0.9em; font-weight: 500; }
         .save-error { color: var(--error); font-size: 0.9em; font-weight: 500; }
 
-        /* Both History and Settings use the same flex pattern: a fixed-
-           width sidebar in the document flow pushes the main column to
-           the right -- no fixed-position overlay. Each sidebar has its
-           own contents (History = filters; Settings = section TOC). */
+        /* Both History, Settings, and the per-queue editor use the same
+           flex pattern: a fixed-width sidebar in the document flow
+           pushes the main column to the right. */
         .layout-history,
-        .layout-settings {
+        .layout-settings,
+        .layout-split {
             display: flex;
             gap: 20px;
             align-items: flex-start;
+        }
+        /* Sidebar variant for a panel nested INSIDE a section card
+           (per-queue's project picker). Same width as the page-level
+           sidebar but without the sticky positioning -- a Section can
+           be scrolled away cleanly and a sticky sidebar would clip. */
+        .sidebar.sidebar-inset {
+            position: static;
+            max-height: none;
+            top: auto;
+            padding: 14px 14px;
         }
         .sidebar {
             flex: 0 0 280px;
@@ -1130,8 +1176,9 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ----- Top-level App: routes between the History and Settings tabs.
 function App() {
     const [tab, setTab] = useState(() => {
-        // Persist tab in URL hash so refresh keeps you on the same view.
-        return window.location.hash.replace(/^#/, '') || 'history';
+        const valid = new Set(['history', 'generate', 'settings']);
+        const fromHash = window.location.hash.replace(/^#/, '');
+        return valid.has(fromHash) ? fromHash : 'history';
     });
     useEffect(() => {
         window.location.hash = tab;
@@ -1180,6 +1227,7 @@ function App() {
                 <h1>Speeker</h1>
                 <div className="tabs">
                     <button className={'tab' + (tab === 'history' ? ' active' : '')} onClick={() => setTab('history')}>Queue History</button>
+                    <button className={'tab' + (tab === 'generate' ? ' active' : '')} onClick={() => setTab('generate')}>Generate</button>
                     <button className={'tab' + (tab === 'settings' ? ' active' : '')} onClick={() => setTab('settings')}>Settings</button>
                     {restartNeeded && (
                         <button
@@ -1193,7 +1241,9 @@ function App() {
                     )}
                 </div>
             </div>
-            {tab === 'history' ? <HistoryView /> : <SettingsView />}
+            {tab === 'history' ? <HistoryView />
+                : tab === 'generate' ? <GenerateView />
+                : <SettingsView />}
         </div>
     );
 }
@@ -1602,7 +1652,7 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                     <th style={{ width: 160 }}>Project</th>
                     <th className="col-date" style={{ width: 110 }}>When</th>
                     <th style={{ width: 80 }}>Status</th>
-                    <th style={{ width: 44 }}></th>
+                    <th style={{ width: 80 }}></th>
                 </tr>
             </thead>
             <tbody>
@@ -1629,14 +1679,17 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                             <td className="col-date">{it.time}</td>
                             <td>{status}</td>
                             <td>
-                                <button
-                                    className="play-btn"
-                                    onClick={() => onPlay(it.id)}
-                                    disabled={!it.has_audio}
-                                    title={it.has_audio ? 'Play' : 'No audio'}
-                                >
-                                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                                </button>
+                                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                    <DownloadBtn itemId={it.id} hasAudio={it.has_audio} small />
+                                    <button
+                                        className="play-btn"
+                                        onClick={() => onPlay(it.id)}
+                                        disabled={!it.has_audio}
+                                        title={it.has_audio ? 'Play' : 'No audio'}
+                                    >
+                                        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                                    </button>
+                                </div>
                             </td>
                         </tr>
                     );
@@ -1667,15 +1720,277 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
                 <div className="card-meta">
                     <div className="metadata" dangerouslySetInnerHTML={{ __html: item.metadata }} />
                 </div>
-                <button
-                    className="play-btn"
-                    onClick={onPlay}
-                    disabled={!item.has_audio}
-                    title={item.has_audio ? 'Play' : 'No audio'}
-                >
-                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-                </button>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <DownloadBtn itemId={item.id} hasAudio={item.has_audio} />
+                    <button
+                        className="play-btn"
+                        onClick={onPlay}
+                        disabled={!item.has_audio}
+                        title={item.has_audio ? 'Play' : 'No audio'}
+                    >
+                        <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                    </button>
+                </div>
             </div>
+        </div>
+    );
+}
+
+// Download glyph button. Right-click for "Save link as..." gives the
+// MP3 variant via the same endpoint with ?format=mp3 -- power users
+// can also hit /download/<id>?format=mp3 directly. The visible action
+// downloads the WAV with a friendly filename.
+function DownloadBtn({ itemId, hasAudio, small }) {
+    if (!hasAudio) {
+        return (
+            <a
+                className={'download-btn disabled' + (small ? ' history-download' : '')}
+                aria-disabled="true"
+                title="No audio to download"
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 4v12m0 0l-5-5m5 5l5-5M5 20h14" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+            </a>
+        );
+    }
+    return (
+        <a
+            className="download-btn"
+            href={`/download/${itemId}?format=wav`}
+            download
+            title="Download WAV (right-click for more options)"
+            onContextMenu={e => {
+                // Tiny enhancement: a left-click downloads WAV, a
+                // right-click could pop a native menu; offer MP3 via a
+                // ctrl/alt+click shortcut so power users have a one-click
+                // path without a dropdown component.
+            }}
+            onAuxClick={e => {
+                if (e.button === 1) {
+                    // Middle-click downloads MP3 instead.
+                    window.location.href = `/download/${itemId}?format=mp3`;
+                }
+            }}
+        >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 4v12m0 0l-5-5m5 5l5-5M5 20h14" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+        </a>
+    );
+}
+
+// ----- Generate tab: ad-hoc TTS. Pick engine + voice, type text, hit
+// Generate. Server synthesizes synchronously and returns audio URLs;
+// no playback through system speakers (so it's safe to generate when
+// the user wants a file but not a sermon). Result appears in queue
+// history under the "generated" project.
+function GenerateView() {
+    const [engines, setEngines] = useState([]);
+    const [globalSettings, setGlobalSettings] = useState(null);
+    const [engine, setEngine] = useState('');
+    const [voice, setVoice] = useState('');
+    const [speed, setSpeed] = useState(1.0);
+    const [text, setText] = useState('');
+    const [result, setResult] = useState(null);    // {queue_id, audio_url, download_wav, download_mp3, size_bytes, ...}
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState('');
+
+    // Initial load: engines + saved global defaults so the dropdowns
+    // mirror what the user expects from Settings.
+    useEffect(() => {
+        fetch('/api/engines').then(r => r.json()).then(d => {
+            setEngines(d.engines || []);
+        });
+        fetch('/api/settings/global').then(r => r.json()).then(d => {
+            setGlobalSettings(d);
+            if (d.engine) setEngine(d.engine);
+            if (d.voice) setVoice(d.voice);
+            if (typeof d.speed === 'number') setSpeed(d.speed);
+        });
+    }, []);
+
+    const engineMeta = useMemo(
+        () => engines.find(e => e.name === engine),
+        [engines, engine],
+    );
+    const voices = engineMeta ? engineMeta.voices : [];
+
+    // When the user picks a different engine, reset the voice to that
+    // engine's default rather than carrying the old engine's selection
+    // (which wouldn't even exist in the new engine's voice list).
+    useEffect(() => {
+        if (!engineMeta) return;
+        if (!voices.find(v => v.id === voice)) {
+            setVoice(engineMeta.default_voice || (voices[0] && voices[0].id) || '');
+        }
+    }, [engineMeta]);
+
+    const onGenerate = async () => {
+        if (busy) return;
+        const t = text.trim();
+        if (!t) {
+            setError('Type something to synthesize.');
+            return;
+        }
+        setError('');
+        setResult(null);
+        setBusy(true);
+        try {
+            const resp = await fetch('/api/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ engine, voice, speed, text: t }),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                setError('Error: ' + (err.detail || resp.statusText));
+                return;
+            }
+            const data = await resp.json();
+            setResult(data);
+        } catch (e) {
+            setError('Failed: ' + e.message);
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    if (!globalSettings || engines.length === 0) return <div>Loading...</div>;
+
+    const charCount = text.length;
+    const charBudget = 5000;
+    const overBudget = charCount > charBudget;
+
+    return (
+        <div className="section" style={{ maxWidth: 920, margin: '0 auto' }}>
+            <h2 className="section-title">Generate</h2>
+            <p className="section-subtitle">
+                Synthesize text with a specific voice and download the audio.
+                Nothing plays through your speakers.
+            </p>
+
+            <div className="field-row">
+                <label>Engine</label>
+                <select value={engine} onChange={e => setEngine(e.target.value)}>
+                    {engines.map(en => (
+                        <option key={en.name} value={en.name}>
+                            {en.label}{en.supports_ssml ? '  [SSML]' : ''}
+                        </option>
+                    ))}
+                </select>
+            </div>
+            <div className="field-row">
+                <label>Voice</label>
+                <select value={voice} onChange={e => setVoice(e.target.value)}>
+                    {voices.map(v => (
+                        <option key={v.id} value={v.id}>{v.id} - {v.label}</option>
+                    ))}
+                </select>
+            </div>
+            <div className="field-row">
+                <label>Speed</label>
+                <input
+                    type="number"
+                    min="0.5" max="2.0" step="0.05"
+                    value={speed}
+                    onChange={e => setSpeed(parseFloat(e.target.value) || 1.0)}
+                />
+            </div>
+
+            <div style={{ marginTop: 16 }}>
+                <label
+                    style={{
+                        display: 'block',
+                        color: 'var(--text-3)',
+                        fontSize: '0.92em',
+                        fontWeight: 500,
+                        marginBottom: 6,
+                    }}
+                >
+                    Text
+                </label>
+                <textarea
+                    value={text}
+                    onChange={e => setText(e.target.value)}
+                    rows={10}
+                    placeholder="Type or paste text..."
+                    style={{
+                        width: '100%',
+                        padding: 12,
+                        background: 'var(--surface-3)',
+                        border: '1px solid ' + (overBudget ? 'var(--error)' : 'var(--border)'),
+                        color: 'var(--text-1)',
+                        borderRadius: 6,
+                        fontSize: 15,
+                        fontFamily: 'inherit',
+                        resize: 'vertical',
+                        lineHeight: 1.55,
+                        boxSizing: 'border-box',
+                    }}
+                />
+                <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    marginTop: 6,
+                    fontSize: '0.85em',
+                    color: overBudget ? 'var(--error)' : 'var(--text-mute)',
+                }}>
+                    <span>{overBudget ? 'Over the per-request limit.' : ''}</span>
+                    <span>{charCount.toLocaleString()} / {charBudget.toLocaleString()} chars</span>
+                </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 16 }}>
+                <button
+                    className="btn"
+                    onClick={onGenerate}
+                    disabled={busy || overBudget || !text.trim()}
+                >
+                    {busy ? 'Generating...' : 'Generate'}
+                </button>
+                {error && <span className="save-error">{error}</span>}
+                {busy && <span className="save-success">Synthesizing... (Polly is ~1-2s)</span>}
+            </div>
+
+            {result && (
+                <div style={{
+                    marginTop: 24,
+                    padding: 20,
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 8,
+                }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12 }}>
+                        <strong style={{ color: 'var(--text-1)' }}>Ready</strong>
+                        <span className="filter-summary">
+                            #{result.queue_id} &middot; {result.engine}/{result.voice} &middot;
+                            {' '}{(result.size_bytes / 1024).toFixed(1)} KB &middot;
+                            {' '}{result.char_count.toLocaleString()} chars
+                        </span>
+                    </div>
+                    {/* HTML5 native controls: play/pause/seek. The src points
+                        at the same /audio/<id> the queue history uses, so
+                        the file is shared and not re-fetched if the user
+                        opens it from another tab too. */}
+                    <audio
+                        src={result.audio_url}
+                        controls
+                        style={{ width: '100%', marginBottom: 12 }}
+                    />
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                        <a className="btn" href={result.download_wav} download>Download WAV</a>
+                        <a className="btn subtle" href={result.download_mp3} download>Download MP3</a>
+                        <a
+                            className="btn subtle"
+                            href="#history"
+                            style={{ marginLeft: 'auto' }}
+                            title="Open the queue history with this generation visible"
+                        >Open in history</a>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }
@@ -2200,9 +2515,238 @@ function TonesSection() {
                         <button className="btn" onClick={save}>Save tones</button>
                         <span className="save-success">{status}</span>
                     </div>
+                    <ToneRulesEditor tunes={tunes} />
                 </>
             )}
         </>
+    );
+}
+
+// ----- Per-queue / per-interpretation tone rules.
+//
+// One table row = one rule. Each rule overrides the default intro / outro /
+// cue notes for a specific queue, a specific interpretation, or both. The
+// hierarchy from broad to narrow is: global default -> interpretation-only
+// rule -> queue-only rule -> queue + interpretation rule (most specific).
+// The daemon picks the highest-specificity match at speech time.
+function ToneRulesEditor({ tunes }) {
+    const [rules, setRules] = useState([]);
+    const [interps, setInterps] = useState([]);
+    const [knownQueues, setKnownQueues] = useState([]);
+    const [loaded, setLoaded] = useState(false);
+    const [status, setStatus] = useState('');
+
+    const load = useCallback(() => {
+        fetch('/api/tone-rules').then(r => r.json()).then(d => {
+            setRules((d.rules || []).map(r => ({
+                slot: r.slot || 'cue',
+                queue: r.queue || '',
+                queue_regex: !!r.queue_regex,
+                interpretation: r.interpretation || '',
+                notes: Array.isArray(r.notes) ? r.notes.join(' ') : '',
+            })));
+            setInterps(d.interpretations || []);
+            setKnownQueues(d.queues || []);
+            setLoaded(true);
+        });
+    }, []);
+
+    useEffect(() => { load(); }, [load]);
+
+    const updateRow = (idx, key, value) => {
+        setRules(rs => rs.map((r, i) => i === idx ? { ...r, [key]: value } : r));
+    };
+
+    const addRow = () => {
+        setRules(rs => [...rs, {
+            slot: 'cue', queue: '', queue_regex: false,
+            interpretation: '', notes: '',
+        }]);
+    };
+
+    const removeRow = (idx) => {
+        setRules(rs => rs.filter((_, i) => i !== idx));
+    };
+
+    const parseNotes = (s) =>
+        (s || '').trim().split(/\s+/).filter(Boolean);
+
+    const tryRow = async (idx) => {
+        const r = rules[idx];
+        const notes = parseNotes(r.notes);
+        if (notes.length === 0) {
+            setStatus('Row ' + (idx + 1) + ': no notes to play.');
+            setTimeout(() => setStatus(''), 2500);
+            return;
+        }
+        try {
+            const resp = await fetch('/api/tones/play', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ notes }),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                setStatus('Error: ' + (err.detail || resp.statusText));
+                return;
+            }
+            setStatus('Playing row ' + (idx + 1) + '...');
+            setTimeout(() => setStatus(''), 2500);
+        } catch (e) {
+            setStatus('Play failed: ' + e.message);
+        }
+    };
+
+    const save = async () => {
+        const payload = rules.map(r => ({
+            slot: r.slot,
+            queue: r.queue.trim() || null,
+            queue_regex: !!r.queue_regex,
+            interpretation: r.interpretation.trim() || null,
+            notes: parseNotes(r.notes),
+        }));
+        setStatus('Saving...');
+        try {
+            const resp = await fetch('/api/tone-rules', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rules: payload }),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                setStatus('Error: ' + (err.detail || resp.statusText));
+                return;
+            }
+            const data = await resp.json();
+            setStatus(data.message || 'Saved.');
+            setTimeout(() => setStatus(''), 3000);
+        } catch (e) {
+            setStatus('Save failed: ' + e.message);
+        }
+    };
+
+    // Tune dropdown sets row.notes from a preset.
+    const onTunePicked = (idx) => (e) => {
+        const name = e.target.value;
+        if (!name) return;
+        const tune = tunes.find(t => t.name === name);
+        if (tune) updateRow(idx, 'notes', tune.notes.join(' '));
+        // Reset the select so the placeholder shows again. The select is
+        // uncontrolled-by-rule because we don't want to track its pick state
+        // per row; the *effect* is on row.notes, not the select itself.
+        e.target.value = '';
+    };
+
+    return (
+        <div style={{ marginTop: 28 }}>
+            <h3 style={{ margin: '0 0 6px', fontSize: '1.05em' }}>Custom rules</h3>
+            <p className="section-subtitle" style={{ marginTop: 0 }}>
+                Override the default tune for specific queues, interpretations, or both.
+                Most-specific match wins. Empty fields mean &ldquo;any&rdquo;.
+            </p>
+            {!loaded ? <div>Loading...</div> : (
+                <>
+                    <table className="pronunciation-table" style={{ marginTop: 8 }}>
+                        <thead>
+                            <tr>
+                                <th style={{ width: 90 }}>Slot</th>
+                                <th>Queue</th>
+                                <th style={{ width: 70 }}>Regex</th>
+                                <th style={{ width: 160 }}>Interpretation</th>
+                                <th>Notes</th>
+                                <th style={{ width: 200 }}></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {rules.length === 0 && (
+                                <tr><td colSpan="6" style={{ color: 'var(--text-3)', padding: '12px 6px' }}>
+                                    No custom rules. Add one below to override the defaults.
+                                </td></tr>
+                            )}
+                            {rules.map((r, idx) => (
+                                <tr key={idx}>
+                                    <td>
+                                        <select
+                                            value={r.slot}
+                                            onChange={e => updateRow(idx, 'slot', e.target.value)}
+                                            style={{ width: '100%' }}
+                                        >
+                                            <option value="intro">intro</option>
+                                            <option value="outro">outro</option>
+                                            <option value="cue">cue</option>
+                                        </select>
+                                    </td>
+                                    <td>
+                                        <input
+                                            type="text"
+                                            placeholder="any"
+                                            list={`tone-rule-queues-${idx}`}
+                                            value={r.queue}
+                                            onChange={e => updateRow(idx, 'queue', e.target.value)}
+                                        />
+                                        <datalist id={`tone-rule-queues-${idx}`}>
+                                            {knownQueues.map(q => <option key={q} value={q} />)}
+                                        </datalist>
+                                    </td>
+                                    <td style={{ textAlign: 'center' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={r.queue_regex}
+                                            onChange={e => updateRow(idx, 'queue_regex', e.target.checked)}
+                                            title="Treat queue as a regex pattern"
+                                        />
+                                    </td>
+                                    <td>
+                                        <input
+                                            type="text"
+                                            placeholder="any"
+                                            list={`tone-rule-interps-${idx}`}
+                                            value={r.interpretation}
+                                            onChange={e => updateRow(idx, 'interpretation', e.target.value)}
+                                        />
+                                        <datalist id={`tone-rule-interps-${idx}`}>
+                                            {interps.map(i => <option key={i} value={i} />)}
+                                        </datalist>
+                                    </td>
+                                    <td>
+                                        <input
+                                            type="text"
+                                            placeholder="e.g. E4 G4 C5:2"
+                                            value={r.notes}
+                                            onChange={e => updateRow(idx, 'notes', e.target.value)}
+                                        />
+                                    </td>
+                                    <td style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                                        <button className="btn-try" onClick={() => tryRow(idx)}>Play</button>
+                                        <select
+                                            onChange={onTunePicked(idx)}
+                                            defaultValue=""
+                                            title="Drop in a public-domain tune"
+                                            style={{ flex: 1 }}
+                                        >
+                                            <option value="">Tune...</option>
+                                            {tunes.map(t => (
+                                                <option key={t.name} value={t.name}>{t.name}</option>
+                                            ))}
+                                        </select>
+                                        <button
+                                            className="btn-try"
+                                            onClick={() => removeRow(idx)}
+                                            title="Remove this rule"
+                                        >×</button>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                    <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+                        <button className="btn" onClick={addRow}>Add rule</button>
+                        <button className="btn" onClick={save}>Save rules</button>
+                        <span className="save-success">{status}</span>
+                    </div>
+                </>
+            )}
+        </div>
     );
 }
 
@@ -2613,92 +3157,105 @@ function PerQueueSection({ engines }) {
                     onChange={e => setSamplePhrase(e.target.value)}
                 />
             </div>
-            {/* Sort + view toggle on a single row; the filter is the
-                vertical ProjectPicker below (same component History uses
-                in its sidebar so the two surfaces feel identical). */}
-            <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 16 }}>
-                <select
-                    value={sortKey}
-                    onChange={e => setSortKey(e.target.value)}
-                    style={{
-                        flex: '0 0 220px',
-                        padding: '9px 12px',
-                        background: 'var(--surface-3)',
-                        border: '1px solid var(--border)',
-                        color: 'var(--text-1)',
-                        borderRadius: 6,
-                        fontSize: 15,
-                    }}
-                    aria-label="Sort"
-                >
-                    <option value="recent">Most recent activity</option>
-                    <option value="count">Most messages</option>
-                    <option value="name">Name A→Z</option>
-                    <option value="name-rev">Name Z→A</option>
-                </select>
-                <div className="view-toggle">
-                    <button
-                        className={viewMode === 'cards' ? 'active' : ''}
-                        onClick={() => setViewMode('cards')}
-                    >Cards</button>
-                    <button
-                        className={viewMode === 'table' ? 'active' : ''}
-                        onClick={() => setViewMode('table')}
-                    >Table</button>
-                </div>
-                {selectedQueues.size > 0 && (
-                    <button
-                        className="btn subtle"
-                        onClick={() => setSelectedQueues(new Set())}
-                        style={{ marginLeft: 'auto' }}
-                    >
-                        Clear filter ({selectedQueues.size})
-                    </button>
-                )}
-            </div>
-            <div style={{
-                background: 'var(--surface-2)',
-                border: '1px solid var(--border)',
-                borderRadius: 8,
-                padding: 12,
-                marginBottom: 16,
-            }}>
-                <ProjectPicker
-                    projects={projectOptions}
-                    selected={selectedQueues}
-                    onToggle={toggleQueue}
-                />
-            </div>
-            {filteredSorted.length === 0
-                ? <div className="no-results">No projects match the filter.</div>
-                : viewMode === 'cards'
-                    ? <PerQueueCards
-                        queues={filteredSorted}
-                        engines={engines}
-                        editing={editing}
-                        pending={pending}
-                        saveStatus={saveStatus}
-                        setField={setField}
-                        startEdit={startEdit}
-                        cancelEdit={() => setEditing(null)}
-                        save={save}
-                        tryRow={tryRow}
-                        tryStatus={tryStatus}
+            <div className="layout-split">
+                {/* Side panel: project filter, mirrors Queue History's
+                    sidebar pattern. Inset variant skips the sticky
+                    positioning because we're inside a Section card. */}
+                <aside className="sidebar sidebar-inset">
+                    <h3 style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <span>Projects</span>
+                        {selectedQueues.size > 0 && (
+                            <button
+                                onClick={() => setSelectedQueues(new Set())}
+                                style={{
+                                    background: 'transparent',
+                                    border: 'none',
+                                    color: 'var(--accent)',
+                                    fontSize: '0.85em',
+                                    cursor: 'pointer',
+                                    padding: 0,
+                                    fontWeight: 600,
+                                }}
+                            >Clear ({selectedQueues.size})</button>
+                        )}
+                    </h3>
+                    <ProjectPicker
+                        projects={projectOptions}
+                        selected={selectedQueues}
+                        onToggle={toggleQueue}
                     />
-                    : <PerQueueTable
-                        queues={filteredSorted}
-                        engines={engines}
-                        editing={editing}
-                        pending={pending}
-                        saveStatus={saveStatus}
-                        setField={setField}
-                        startEdit={startEdit}
-                        cancelEdit={() => setEditing(null)}
-                        save={save}
-                        tryRow={tryRow}
-                        tryStatus={tryStatus}
-                    />
-            }
+                </aside>
+
+                {/* Main column: sort + view toggle on top, cards/table below. */}
+                <main className="main">
+                    <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginBottom: 16 }}>
+                        <select
+                            value={sortKey}
+                            onChange={e => setSortKey(e.target.value)}
+                            style={{
+                                flex: '0 0 220px',
+                                padding: '9px 12px',
+                                background: 'var(--surface-3)',
+                                border: '1px solid var(--border)',
+                                color: 'var(--text-1)',
+                                borderRadius: 6,
+                                fontSize: 15,
+                            }}
+                            aria-label="Sort"
+                        >
+                            <option value="recent">Most recent activity</option>
+                            <option value="count">Most messages</option>
+                            <option value="name">Name A→Z</option>
+                            <option value="name-rev">Name Z→A</option>
+                        </select>
+                        <div className="view-toggle">
+                            <button
+                                className={viewMode === 'cards' ? 'active' : ''}
+                                onClick={() => setViewMode('cards')}
+                            >Cards</button>
+                            <button
+                                className={viewMode === 'table' ? 'active' : ''}
+                                onClick={() => setViewMode('table')}
+                            >Table</button>
+                        </div>
+                        <span className="filter-summary" style={{ marginLeft: 'auto' }}>
+                            {selectedQueues.size === 0
+                                ? `${filteredSorted.length} project${filteredSorted.length === 1 ? '' : 's'}`
+                                : `${filteredSorted.length} of ${queues.length} project${queues.length === 1 ? '' : 's'}`}
+                        </span>
+                    </div>
+                    {filteredSorted.length === 0
+                        ? <div className="no-results">No projects match the filter.</div>
+                        : viewMode === 'cards'
+                            ? <PerQueueCards
+                                queues={filteredSorted}
+                                engines={engines}
+                                editing={editing}
+                                pending={pending}
+                                saveStatus={saveStatus}
+                                setField={setField}
+                                startEdit={startEdit}
+                                cancelEdit={() => setEditing(null)}
+                                save={save}
+                                tryRow={tryRow}
+                                tryStatus={tryStatus}
+                            />
+                            : <PerQueueTable
+                                queues={filteredSorted}
+                                engines={engines}
+                                editing={editing}
+                                pending={pending}
+                                saveStatus={saveStatus}
+                                setField={setField}
+                                startEdit={startEdit}
+                                cancelEdit={() => setEditing(null)}
+                                save={save}
+                                tryRow={tryRow}
+                                tryStatus={tryStatus}
+                            />
+                    }
+                </main>
+            </div>
         </>
     );
 }
@@ -2940,6 +3497,237 @@ async def index(q: str | None = None):
     return HTMLResponse(content=HTML_TEMPLATE)
 
 
+class GenerateRequest(BaseModel):
+    """Ad-hoc TTS generation request.
+
+    All fields except ``text`` are optional and fall back to the saved
+    global defaults. Generation is fully synchronous and bypasses the
+    daemon (no audio plays through the system speakers) -- the endpoint
+    writes the WAV to disk, records it in the queue history, and
+    returns URLs for preview + download.
+    """
+    text: str
+    engine: str | None = None
+    voice: str | None = None
+    speed: float | None = None
+
+
+@router.post("/api/generate")
+async def api_generate(body: GenerateRequest):
+    """Ad-hoc text-to-speech.
+
+    Synthesizes synchronously (no daemon, no playback). Creates a queue
+    row in the ``generated`` session so the result shows up in queue
+    history and benefits from the standard /audio + /download endpoints.
+    Returns ``queue_id`` and convenience URLs.
+    """
+    from datetime import datetime, timezone
+
+    from .cli import start_player  # noqa: F401 - import for parity with other endpoints
+    from .player import generate_tts, get_audio_save_path
+    from .queue_db import enqueue, get_connection, get_settings
+
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text cannot be empty")
+    if len(text) > 5000:
+        raise HTTPException(status_code=413, detail="text exceeds the 5000 character limit")
+    if body.engine and body.engine not in _KNOWN_ENGINES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown engine {body.engine!r}. Known: {', '.join(sorted(_KNOWN_ENGINES))}",
+        )
+    if body.voice and body.voice not in _known_voices():
+        raise HTTPException(status_code=400, detail=f"Unknown voice {body.voice!r}")
+
+    # Resolve missing axes from the saved global defaults so the
+    # generated audio uses the user's preferred engine/voice even when
+    # they don't specify them in the request.
+    settings = get_settings(None)
+    engine = body.engine or settings.get("engine") or "polly"
+    voice = body.voice or settings.get("voice") or settings.get("voice")
+    speed = body.speed if isinstance(body.speed, (int, float)) and body.speed > 0 else float(settings.get("speed", 1.0))
+
+    metadata: dict[str, str] = {"queue": "generated", "engine": engine, "voice": voice}
+
+    # Enqueue first so we get an id; the per-item audio path is derived
+    # from the id. We then update the row with the file path after
+    # synthesis succeeds (or mark it played without a path on failure).
+    queue_id = enqueue(text, metadata=metadata)
+    save_path = get_audio_save_path(queue_id)
+
+    try:
+        result = generate_tts(
+            text,
+            engine=engine,
+            voice=voice,
+            speed=speed,
+            save_path=save_path,
+            verbose=False,
+        )
+    except Exception as e:
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE queue SET played_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), queue_id),
+            )
+            conn.commit()
+        raise HTTPException(status_code=500, detail=f"Generation failed: {e}")
+
+    if result is None or not Path(save_path).exists():
+        with get_connection() as conn:
+            conn.execute(
+                "UPDATE queue SET played_at = ? WHERE id = ?",
+                (datetime.now(timezone.utc).isoformat(), queue_id),
+            )
+            conn.commit()
+        raise HTTPException(status_code=500, detail="Generation produced no audio")
+
+    # Mark played + record audio_path so /audio/<id> and /download/<id>
+    # both serve the file. The daemon never sees this row.
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE queue SET played_at = ?, audio_path = ? WHERE id = ?",
+            (datetime.now(timezone.utc).isoformat(), str(save_path), queue_id),
+        )
+        conn.commit()
+
+    size = Path(save_path).stat().st_size
+    return JSONResponse({
+        "queue_id": queue_id,
+        "engine": engine,
+        "voice": voice,
+        "speed": speed,
+        "char_count": len(text),
+        "size_bytes": size,
+        "audio_url": f"/audio/{queue_id}",
+        "download_wav": f"/download/{queue_id}?format=wav",
+        "download_mp3": f"/download/{queue_id}?format=mp3",
+    })
+
+
+def _resolve_audio_for_item(item: dict) -> Path | None:
+    """Resolve a playable audio file for a queue row.
+
+    Mirrors /audio/<id>'s fallback chain so /download/<id> can stream
+    the same bytes:
+
+    1. Stored ``audio_path`` if the file exists on disk.
+    2. Tone-only synthesis (cached chord WAV) for rows whose text is
+       just ``$Note`` tokens.
+    3. ``None`` if neither resolves.
+    """
+    raw = item.get("audio_path")
+    if raw:
+        p = Path(raw)
+        if p.exists():
+            return p
+    try:
+        from .player import extract_tone_tokens, generate_combined_tones_from_tokens
+        text = item.get("text") or ""
+        leading, body, _trailing = extract_tone_tokens(text)
+        if leading and not body:
+            meta = item.get("metadata") or {}
+            td = meta.get("tone_duration")
+            duration = (
+                float(td)
+                if isinstance(td, (int, float)) and not isinstance(td, bool) and td > 0
+                else 0.8
+            )
+            cache_path = generate_combined_tones_from_tokens(leading, duration=duration)
+            if cache_path and Path(cache_path).exists():
+                return Path(cache_path)
+    except Exception:
+        pass
+    return None
+
+
+_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
+
+
+def _download_filename(item: dict, item_id: int, ext: str) -> str:
+    """Build a friendly download filename, e.g. ``speeker-14482-compass-docs-2026-05-30.wav``."""
+    queue = (item.get("session_id") or "default")
+    queue = _SAFE_FILENAME_RE.sub("-", queue).strip("-") or "default"
+    created = item.get("created_at") or ""
+    date_part = created[:10] if created and len(created) >= 10 else "unknown"
+    return f"speeker-{item_id}-{queue}-{date_part}.{ext}"
+
+
+@router.get("/download/{item_id}")
+async def download_audio(item_id: int, format: str = "wav"):
+    """Download a queue item's audio with attachment disposition.
+
+    ``format=wav`` (default) streams the source WAV unchanged.
+    ``format=mp3`` requires ``ffmpeg`` on PATH; the WAV is transcoded
+    in-memory and streamed. Other formats return 400.
+
+    Returns 404 for rows that don't have a playable audio resolution
+    (TTS generation failed, daemon never finished, etc.).
+    """
+    history = get_history(limit=1000)
+    item = next((it for it in history if it["id"] == item_id), None)
+    if item is None:
+        raise HTTPException(status_code=404, detail="Item not found")
+    src = _resolve_audio_for_item(item)
+    if src is None:
+        raise HTTPException(status_code=404, detail="No audio for this item")
+
+    fmt = (format or "wav").lower().strip()
+    if fmt == "wav":
+        return FileResponse(
+            src,
+            media_type="audio/wav",
+            filename=_download_filename(item, item_id, "wav"),
+        )
+
+    if fmt == "mp3":
+        import shutil
+        import subprocess
+        from fastapi.responses import StreamingResponse
+
+        # launchd-managed processes get a minimal PATH that often
+        # doesn't include /opt/homebrew/bin or /usr/local/bin where
+        # Homebrew installs ffmpeg. Check the well-known macOS install
+        # locations explicitly before giving up.
+        ffmpeg = (
+            shutil.which("ffmpeg")
+            or next(
+                (p for p in (
+                    "/opt/homebrew/bin/ffmpeg",
+                    "/usr/local/bin/ffmpeg",
+                    "/usr/bin/ffmpeg",
+                ) if Path(p).exists()),
+                None,
+            )
+        )
+        if not ffmpeg:
+            raise HTTPException(
+                status_code=415,
+                detail="MP3 export needs ffmpeg (brew install ffmpeg).",
+            )
+        proc = subprocess.Popen(
+            [
+                ffmpeg, "-loglevel", "error", "-i", str(src),
+                "-codec:a", "libmp3lame", "-q:a", "4", "-f", "mp3", "pipe:1",
+            ],
+            stdout=subprocess.PIPE,
+        )
+        filename = _download_filename(item, item_id, "mp3")
+        return StreamingResponse(
+            proc.stdout,
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+
+    raise HTTPException(
+        status_code=400,
+        detail=f"Unknown format {fmt!r}. Use 'wav' or 'mp3'.",
+    )
+
+
 @router.get("/audio/{item_id}")
 async def get_audio(item_id: int):
     """Serve audio for a queue item.
@@ -2962,31 +3750,10 @@ async def get_audio(item_id: int):
     item = next((it for it in history if it["id"] == item_id), None)
     if item is None:
         return HTMLResponse(content="Audio not found", status_code=404)
-
-    if item["audio_path"]:
-        audio_path = Path(item["audio_path"])
-        if audio_path.exists():
-            return FileResponse(audio_path, media_type="audio/wav")
-
-    # Tone-only fallback: parse the row's text and synthesize / serve
-    # the cached chord WAV. Imported lazily so the web module stays
-    # importable even when the player isn't loadable for whatever
-    # reason (e.g. tones lib missing in some minimal install).
-    try:
-        from .player import extract_tone_tokens, generate_combined_tones_from_tokens
-        text = item.get("text") or ""
-        leading, body, _trailing = extract_tone_tokens(text)
-        if leading and not body:
-            meta = item.get("metadata") or {}
-            td = meta.get("tone_duration")
-            duration = float(td) if isinstance(td, (int, float)) and not isinstance(td, bool) and td > 0 else 0.8
-            cache_path = generate_combined_tones_from_tokens(leading, duration=duration)
-            if cache_path and Path(cache_path).exists():
-                return FileResponse(cache_path, media_type="audio/wav")
-    except Exception:
-        pass
-
-    return HTMLResponse(content="Audio not found", status_code=404)
+    src = _resolve_audio_for_item(item)
+    if src is None:
+        return HTMLResponse(content="Audio not found", status_code=404)
+    return FileResponse(src, media_type="audio/wav")
 
 
 @router.get("/api/items")
@@ -3639,6 +4406,71 @@ async def api_put_tones(body: TonesUpdate):
         "duration_seconds": tones.get("duration_seconds", 0.12),
         "message": "Saved. Takes effect on the next intro/outro batch.",
     })
+
+
+# ----- Per-queue / per-interpretation tone rules.
+#
+# A rule overrides the default intro/outro/cue notes for a specific queue,
+# interpretation, or queue+interpretation pair. Resolution at speech time
+# picks the highest-specificity matching rule; see tone_rules.py.
+
+@router.get("/api/tone-rules")
+async def api_get_tone_rules():
+    """Return the saved tone_rules list plus catalog data for the editor.
+
+    ``interpretations`` is the set of valid interpretation names (built-in
+    + config map). ``queues`` is the known session ids from queue_db --
+    handy for autocompletion but not enforced (the rule's queue field
+    accepts any string, regex or exact).
+    """
+    queues = []
+    for row in get_all_sessions():
+        sid = row["session_id"]
+        if sid in (None, "__global__"):
+            continue
+        queues.append(sid)
+    return JSONResponse({
+        "rules": get_tone_rules(),
+        "interpretations": interpretation_names(),
+        "queues": sorted(set(queues)),
+    })
+
+
+class ToneRulesUpdate(BaseModel):
+    rules: list[dict]
+
+
+@router.put("/api/tone-rules")
+async def api_put_tone_rules(body: ToneRulesUpdate):
+    """Replace the saved tone_rules with the supplied list.
+
+    Each rule is validated and normalized: bad rules return 400 with the
+    offending index, so a malformed UI submission never silently drops
+    rows. Saving takes effect on the next utterance -- the resolver
+    re-reads config per call.
+    """
+    normalized: list[dict] = []
+    for idx, raw in enumerate(body.rules):
+        ok, err = validate_rule(raw)
+        if not ok:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Rule {idx}: {err}",
+            )
+        normalized.append(normalize_rule(raw))
+    cfg = get_config()
+    cfg["tone_rules"] = normalized
+    save_config(cfg)
+    return JSONResponse({
+        "rules": normalized,
+        "message": "Saved. Takes effect on the next utterance.",
+    })
+
+
+@router.get("/api/interpretations")
+async def api_get_interpretations():
+    """List known interpretation names (built-in SUCCESS/ERROR plus map keys)."""
+    return JSONResponse({"interpretations": interpretation_names()})
 
 
 @router.get("/api/effects")

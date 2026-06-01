@@ -268,25 +268,40 @@ def _tone_duration_seconds() -> float:
         return 0.12
 
 
-def get_intro_sound() -> Path:
+def _resolve_slot_notes(slot: str, queue: str | None, fallback: list[str]) -> list[str]:
+    """Find the tune for ``slot`` honoring per-queue / per-interpretation rules.
+
+    Intro/outro have no interpretation context, so only queue-tier rules
+    can match. Falls back to ``config.tones.<slot>`` when no rule applies.
+    """
+    from .tone_rules import resolve_tone_notes
+    override = resolve_tone_notes(slot, queue, None)
+    if override:
+        # The resolver already validated note notation; trust its output.
+        return override
+    return _tones_from_config(slot, fallback)
+
+
+def get_intro_sound(queue: str | None = None) -> Path:
     """Get path to the intro tone, synthesized from configured notes.
 
-    Reads ``config.tones.intro`` (e.g. ``["E4","G4","C5"]``) and renders
-    the notes via the same ``tones`` library used by inline ``$Note``
-    tokens. The path is content-addressed via the cache key in
-    ``generate_combined_tones_from_tokens`` so changing the config yields
-    a fresh file -- no manual cache invalidation needed.
+    With no queue context the global ``config.tones.intro`` is used. With
+    a queue, ``tone_rules`` is consulted first so a per-queue intro can
+    override the global tune. The synthesized WAV is cached by content
+    hash (see ``generate_combined_tones_from_tokens``) so per-queue tunes
+    don't trample each other.
     """
-    notes = _tones_from_config("intro", ["E4", "G4", "C5"])
+    notes = _resolve_slot_notes("intro", queue, ["E4", "G4", "C5"])
     return generate_combined_tones_from_tokens(notes, duration=_tone_duration_seconds())
 
 
-def get_outro_sound() -> Path:
+def get_outro_sound(queue: str | None = None) -> Path:
     """Get path to the outro tone, synthesized from configured notes.
 
-    Reads ``config.tones.outro`` (e.g. ``["C5","G4","E4"]``).
+    With a queue, ``tone_rules`` is consulted first so a per-queue outro
+    overrides the global tune. Falls back to ``config.tones.outro``.
     """
-    notes = _tones_from_config("outro", ["C5", "G4", "E4"])
+    notes = _resolve_slot_notes("outro", queue, ["C5", "G4", "E4"])
     return generate_combined_tones_from_tokens(notes, duration=_tone_duration_seconds())
 
 
@@ -522,12 +537,53 @@ def synthesize_note_cue(name: str, spec: list[tuple[str, int, float]]) -> Path |
     return cue_path
 
 
-def render_interpretation_cue(name: str, verbose: bool = False) -> Path | None:
+def _cue_spec_from_notes(notes: list[str]) -> list[tuple[str, int, float]]:
+    """Convert a tone_rules notes list into a synthesize_note_cue spec.
+
+    Notes carry an optional ``:multiplier`` suffix. The base cue note
+    duration is ``DEFAULT_NOTE_SECONDS`` (from interpretations); the
+    multiplier scales each note's seconds. Malformed tokens are dropped
+    so one bad entry doesn't abort the cue.
+    """
+    from .interpretations import DEFAULT_NOTE_SECONDS
+    spec: list[tuple[str, int, float]] = []
+    for token in notes:
+        parsed = parse_note_token(token)
+        if parsed is None:
+            continue
+        note, octave, mult = parsed
+        spec.append((note, octave, DEFAULT_NOTE_SECONDS * mult))
+    return spec
+
+
+def render_interpretation_cue(
+    name: str,
+    verbose: bool = False,
+    *,
+    queue: str | None = None,
+) -> Path | None:
     """Resolve an interpretation name to a playable cue path, or None.
 
+    Consults ``tone_rules`` first: a per-queue+interpretation, per-queue,
+    or per-interpretation rule overrides the global ``interpretations.map``
+    entry. Falls back to ``resolve_interpretation`` when no rule matches.
+
     Unknown names, unsupported indication types, and missing sound files all
-    return None (with a warning) so a misconfigured cue never aborts playback."""
+    return None (with a warning) so a misconfigured cue never aborts playback.
+    """
     from .interpretations import notes_to_spec, resolve_interpretation
+    from .tone_rules import resolve_tone_notes
+
+    rule_notes = resolve_tone_notes("cue", queue, name)
+    if rule_notes:
+        spec = _cue_spec_from_notes(rule_notes)
+        if spec:
+            # Cache key folds in the queue so per-queue cues for the same
+            # interpretation don't collide. The hash inside
+            # synthesize_note_cue already differentiates by spec content,
+            # but adding the queue makes the on-disk filename readable.
+            cache_name = f"{name}@{queue}" if queue else name
+            return synthesize_note_cue(cache_name, spec)
 
     indication = resolve_interpretation(name)
     if indication is None:
@@ -551,7 +607,12 @@ def render_interpretation_cue(name: str, verbose: bool = False) -> Path | None:
     return None
 
 
-def play_interpretation_cue(name: str, verbose: bool = False) -> None:
+def play_interpretation_cue(
+    name: str,
+    verbose: bool = False,
+    *,
+    queue: str | None = None,
+) -> None:
     """Render and play an interpretation cue, then pause. No-op if unresolved.
 
     The cue blocks until it finishes (play_audio waits on the player), then we
@@ -559,7 +620,7 @@ def play_interpretation_cue(name: str, verbose: bool = False) -> None:
     behavior for both note cues and sound files."""
     from .interpretations import pause_after_seconds
 
-    cue = render_interpretation_cue(name, verbose)
+    cue = render_interpretation_cue(name, verbose, queue=queue)
     if cue is None:
         return
     if verbose:
@@ -684,9 +745,11 @@ def compute_auto_label_prefix(
 ) -> str | None:
     """Decide whether to prepend a queue-title prefix to the next utterance.
 
-    Returns the spoken prefix (e.g. ``"$Eb4 compass docs"``) when *either* the
-    quiet threshold has elapsed since the last utterance *or* the queue
-    context just changed; ``None`` means speak without a prefix.
+    Returns the spoken prefix (e.g. ``"$Eb4 project compass docs"``) when
+    *either* the quiet threshold has elapsed since the last utterance *or*
+    the queue context just changed; ``None`` means speak without a prefix.
+    The literal word "project" precedes the title so the listener hears
+    the category boundary before the project name itself.
 
     ``display_name_override`` -- if a caller supplied ``metadata.display_name``
     on any item in this session, use that verbatim as the spoken title
@@ -713,17 +776,17 @@ def compute_auto_label_prefix(
 
     # First-ever utterance: there is no prior context, so label it.
     if last_utterance_at is None:
-        return f"{tone} {title}"
+        return f"{tone} project {title}"
 
     # Context switch: a different queue just spoke. Always relabel so the
     # listener notices the project changed even within a fast burst.
     if last_queue_id != session_id:
-        return f"{tone} {title}"
+        return f"{tone} project {title}"
 
     # Same queue: only relabel after the quiet threshold has elapsed.
     elapsed = (datetime.now(timezone.utc) - last_utterance_at).total_seconds()
     if elapsed > threshold:
-        return f"{tone} {title}"
+        return f"{tone} project {title}"
 
     return None
 
@@ -744,7 +807,7 @@ def build_session_script(
     the letters "EEB 4". Now items keep their leading $Note position so
     ``extract_tone_tokens`` plays it as audio.
 
-    Auto-labeling: ``auto_label_prefix`` (e.g. ``"$Eb4 compass docs"``) is
+    Auto-labeling: ``auto_label_prefix`` (e.g. ``"$Eb4 project compass docs"``) is
     prepended to the FIRST item that doesn't already start with a $Note
     token. Items that begin with a $Note token already carry project context
     (from the server's ``format_with_title`` or the hook's
@@ -826,10 +889,16 @@ def process_queue(verbose: bool = False) -> int:
     # between the chord and "This is Claude Code." -- the natural envelope
     # decay of the tone provides enough separation, and the previous 200ms
     # padding was perceptible dead air.
+    #
+    # When a per-queue intro rule exists for the FIRST session, use that
+    # tune instead of the global default. Multi-queue batches still use
+    # the first session's intro -- there's only one intro signal per
+    # batch.
     if should_announce_intro() and not is_single_message and global_settings["intro_sound"]:
         if verbose:
             print("[INFO] Playing intro sound", file=sys.stderr)
-        play_audio(get_intro_sound(), verbose)
+        intro_queue = sessions[0] if sessions else None
+        play_audio(get_intro_sound(queue=intro_queue), verbose)
         speak_text("This is Claude Code.", verbose=verbose, engine=global_settings["engine"])
         time.sleep(PAUSE_BETWEEN_SESSIONS)
 
@@ -936,8 +1005,8 @@ def process_queue(verbose: bool = False) -> int:
             # project context is preserved.
             if line_interpretation:
                 if not line_is_ssml:
-                    _stripped_tones, line = extract_tone_tokens(line)
-                play_interpretation_cue(line_interpretation, verbose)
+                    _stripped_tones, line, _trailing_drop = extract_tone_tokens(line)
+                play_interpretation_cue(line_interpretation, verbose, queue=session_id)
 
             # Tell the web UI which item is being spoken right now so its
             # card can be highlighted. Always cleared in a try/finally so a
@@ -1004,7 +1073,9 @@ def process_queue(verbose: bool = False) -> int:
     # frequent.
     if total_played > 0 and not is_single_message and global_settings["intro_sound"]:
         time.sleep(PAUSE_BETWEEN_SESSIONS)
-        play_audio(get_outro_sound(), verbose)
+        # Use the LAST played session for outro context so a multi-queue
+        # batch ends with that queue's outro tune (if defined).
+        play_audio(get_outro_sound(queue=last_played_queue), verbose)
 
     if total_played > 0:
         # Persist both the time and the last queue so the *next* batch can

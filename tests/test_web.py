@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for web.py utility functions and routes."""
 
+import os
 from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
@@ -828,6 +829,94 @@ class TestToneTunesAndPlay:
             )
             assert response.status_code == 200
             assert mock_enqueue.call_args.kwargs["metadata"]["tone_duration"] == 2.0
+
+
+class TestToneRulesEndpoints:
+    """GET/PUT /api/tone-rules and GET /api/interpretations."""
+
+    def test_get_empty(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.get("/api/tone-rules")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["rules"] == []
+        # Built-in interpretations always present so the editor's dropdown
+        # is populated even before the user defines any.
+        assert "SUCCESS" in data["interpretations"]
+        assert "ERROR" in data["interpretations"]
+        assert isinstance(data["queues"], list)
+
+    def test_put_and_round_trip(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            payload = {
+                "rules": [
+                    {
+                        "slot": "cue",
+                        "queue": "compass-docs",
+                        "queue_regex": False,
+                        "interpretation": "SUCCESS",
+                        "notes": ["E5", "G5"],
+                    },
+                ]
+            }
+            response = client.put("/api/tone-rules", json=payload)
+            assert response.status_code == 200, response.text
+            data = response.json()
+            assert len(data["rules"]) == 1
+            assert data["rules"][0]["queue"] == "compass-docs"
+            assert data["rules"][0]["notes"] == ["E5", "G5"]
+            # Persisted and visible on subsequent GET.
+            response = client.get("/api/tone-rules")
+            assert response.status_code == 200
+            assert response.json()["rules"][0]["notes"] == ["E5", "G5"]
+
+    def test_put_rejects_bad_slot(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.put("/api/tone-rules", json={
+                "rules": [{"slot": "bogus", "queue": "X", "notes": ["E4"]}],
+            })
+        assert response.status_code == 400
+        assert "slot" in response.text.lower()
+
+    def test_put_rejects_bad_notes(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.put("/api/tone-rules", json={
+                "rules": [{"slot": "intro", "queue": "X", "notes": ["junk"]}],
+            })
+        assert response.status_code == 400
+
+    def test_put_rejects_no_queue_or_interpretation(self, tmp_path, client):
+        """A rule with neither dimension would match every utterance --
+        rejected so the editor surfaces the mistake."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.put("/api/tone-rules", json={
+                "rules": [{"slot": "cue", "notes": ["E4"]}],
+            })
+        assert response.status_code == 400
+
+    def test_put_normalizes_whitespace(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.put("/api/tone-rules", json={
+                "rules": [{
+                    "slot": "intro",
+                    "queue": "  compass-docs  ",
+                    "interpretation": "  SUCCESS  ",
+                    "notes": ["  E4  ", "G4"],
+                }],
+            })
+        assert response.status_code == 200
+        rule = response.json()["rules"][0]
+        assert rule["queue"] == "compass-docs"
+        assert rule["interpretation"] == "SUCCESS"
+        assert rule["notes"] == ["E4", "G4"]
+
+    def test_get_interpretations(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.get("/api/interpretations")
+        assert response.status_code == 200
+        names = response.json()["interpretations"]
+        assert "SUCCESS" in names
+        assert "ERROR" in names
 
 
 class TestEnginesTryRoute:
