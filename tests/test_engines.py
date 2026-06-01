@@ -143,7 +143,83 @@ class TestPollyEngine:
         eng = PollyEngine()
         assert eng.supports_ssml is True
         eng.warm()    # no-op, must not raise
-        eng.unload()  # no-op, must not raise
+        eng.unload()  # clears client + variant cache, must not raise
+
+    def test_falls_back_when_voice_rejects_engine(self, tmp_path):
+        """A voice that doesn't support the configured variant (e.g.
+        'Gregory' is long-form only but config says 'generative') must
+        transparently fall back to a supported variant instead of
+        failing. Polly's own ValidationException drives the fallback."""
+        from speeker.engines import PollyEngine, _polly_variant_cache
+        from speeker.config import save_config
+        _polly_variant_cache.clear()
+
+        pcm = np.array([0, 16384], dtype=np.int16).tobytes()
+        boto3, client = _mock_boto3_returning(pcm)
+
+        # generative -> rejected; anything else -> success.
+        def _synth(**kwargs):
+            if kwargs["Engine"] == "generative":
+                raise Exception(
+                    "An error occurred (ValidationException) when calling the "
+                    "SynthesizeSpeech operation: This voice does not support "
+                    "the selected engine: generative"
+                )
+            return {"AudioStream": io.BytesIO(pcm)}
+        client.synthesize_speech.side_effect = _synth
+
+        with patch.dict(sys.modules, {"boto3": boto3}), \
+             patch.dict("os.environ", {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({"polly": {"engine": "generative"}})
+            eng = PollyEngine()
+            audio, sr = eng.generate("hello", "Gregory", is_ssml=False)
+
+        assert sr == 16000
+        assert audio.dtype == np.float32
+        # The final successful call used the first fallback variant, neural.
+        used_engines = [c.kwargs["Engine"] for c in client.synthesize_speech.call_args_list]
+        assert used_engines[0] == "generative"   # tried requested first
+        assert used_engines[-1] == "neural"       # resolved to fallback
+        # Cache now maps (voice, requested) -> resolved so the next
+        # utterance skips the failed generative round-trip.
+        assert _polly_variant_cache[("Gregory", "generative")] == "neural"
+
+    def test_cached_variant_skips_failed_roundtrip(self, tmp_path):
+        """Once a (voice, requested) pair resolves, the next call starts
+        from the cached working variant -- no repeated failures."""
+        from speeker.engines import PollyEngine, _polly_variant_cache
+        from speeker.config import save_config
+        _polly_variant_cache.clear()
+        _polly_variant_cache[("Gregory", "generative")] = "neural"
+
+        pcm = np.array([0], dtype=np.int16).tobytes()
+        boto3, client = _mock_boto3_returning(pcm)
+        with patch.dict(sys.modules, {"boto3": boto3}), \
+             patch.dict("os.environ", {"SPEEKER_DIR": str(tmp_path)}):
+            save_config({"polly": {"engine": "generative"}})
+            eng = PollyEngine()
+            eng.generate("hi", "Gregory")
+        # Only one call, and it went straight to neural -- no generative attempt.
+        used = [c.kwargs["Engine"] for c in client.synthesize_speech.call_args_list]
+        assert used == ["neural"]
+
+    def test_non_engine_validation_error_propagates(self, tmp_path):
+        """Errors that aren't engine/voice incompatibility (bad SSML,
+        throttling) must NOT be swallowed by the fallback loop -- they
+        propagate so the daemon's retry/surface path handles them."""
+        from speeker.engines import PollyEngine, _polly_variant_cache
+        _polly_variant_cache.clear()
+        boto3, client = _mock_boto3_returning(b"")
+        client.synthesize_speech.side_effect = Exception(
+            "An error occurred (ThrottlingException): Rate exceeded"
+        )
+        with patch.dict(sys.modules, {"boto3": boto3}), \
+             patch.dict("os.environ", {"SPEEKER_DIR": str(tmp_path)}):
+            eng = PollyEngine()
+            with pytest.raises(Exception, match="ThrottlingException"):
+                eng.generate("hi", "Joanna")
+        # Only one attempt -- we don't retry across variants for non-engine errors.
+        assert client.synthesize_speech.call_count == 1
 
     def test_uses_configured_profile_and_region(self, tmp_path):
         from speeker.engines import PollyEngine
