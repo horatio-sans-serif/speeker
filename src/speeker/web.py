@@ -237,6 +237,47 @@ HTML_TEMPLATE = """
             position: relative;
             border-left: 4px solid var(--queue-color, var(--border));
         }
+        /* Header row: full queue name on the left (chip wraps for long
+           UUID-style ids), click-to-toggle time pill on the right. The
+           queue chip is the card's identity anchor; the time tells you
+           when it played. Status pill moved to the footer next to the
+           action buttons since it's about runtime state, not identity. */
+        .card-header-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .card-header-row .queue-chip-full {
+            flex: 1;
+            min-width: 0;
+        }
+        /* Time pill: borderless ghost button so it reads as text but
+           affords a click. Hover-fill hints at the toggle without
+           competing with the play/copy/download buttons in the footer. */
+        .time-toggle {
+            background: transparent;
+            color: var(--text-3);
+            border: 1px solid transparent;
+            font: inherit;
+            font-size: 0.82em;
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: pointer;
+            white-space: nowrap;
+            flex-shrink: 0;
+            transition: background 0.12s, color 0.12s, border-color 0.12s;
+        }
+        .time-toggle:hover {
+            background: var(--surface-2);
+            color: var(--text-1);
+            border-color: var(--border);
+        }
+        .time-toggle:focus-visible {
+            outline: 2px solid var(--accent-line);
+            outline-offset: 2px;
+        }
         .card-text {
             color: var(--text-1);
             font-size: 0.95em;
@@ -1427,6 +1468,23 @@ function HistoryView() {
     // View mode: cards or table. Persisted to localStorage.
     const [viewMode, setViewMode] = useState(() => localStorage.getItem('speeker.viewMode') || 'cards');
     useEffect(() => { localStorage.setItem('speeker.viewMode', viewMode); }, [viewMode]);
+    // Page-wide time format: when true, cards and table render "3 hours
+    // ago"; when false, the absolute "Jun 01 11:34". Clicking the time
+    // on any card flips this so the whole history view stays consistent.
+    // Live ticking: re-render every minute so relative labels stay fresh.
+    const [relativeTimes, setRelativeTimes] = useState(
+        () => localStorage.getItem('speeker.relativeTimes') !== '0'
+    );
+    useEffect(() => {
+        localStorage.setItem('speeker.relativeTimes', relativeTimes ? '1' : '0');
+    }, [relativeTimes]);
+    const [, _setTick] = useState(0);
+    useEffect(() => {
+        if (!relativeTimes) return;  // No need to re-render absolute labels.
+        const id = setInterval(() => _setTick(t => t + 1), 60000);
+        return () => clearInterval(id);
+    }, [relativeTimes]);
+    const toggleRelativeTimes = useCallback(() => setRelativeTimes(v => !v), []);
     const [playingId, setPlayingId] = useState(null);
     // The daemon's "currently speaking" id (vs `playingId` which is the
     // browser <audio> element's manual playback). Updated every poll.
@@ -1620,6 +1678,8 @@ function HistoryView() {
                                 isPlaying={String(it.id) === String(playingId)}
                                 isSpeaking={String(it.id) === String(speakingId)}
                                 onPlay={() => onPlay(it.id)}
+                                relativeTimes={relativeTimes}
+                                onToggleTimes={toggleRelativeTimes}
                             />
                         ))}
                     </div>
@@ -1629,6 +1689,8 @@ function HistoryView() {
                         speakingId={speakingId}
                         playingId={playingId}
                         onPlay={onPlay}
+                        relativeTimes={relativeTimes}
+                        onToggleTimes={toggleRelativeTimes}
                     />
                 )}
             </main>
@@ -1886,14 +1948,19 @@ function CopyBtn({ text, small }) {
     );
 }
 
-function HistoryTable({ items, speakingId, playingId, onPlay }) {
+function HistoryTable({ items, speakingId, playingId, onPlay, relativeTimes, onToggleTimes }) {
     return (
         <table className="history-table">
             <thead>
                 <tr>
                     <th>Text</th>
                     <th style={{ width: 130 }}>Project</th>
-                    <th className="col-date" style={{ width: 110 }}>When</th>
+                    <th
+                        className="col-date"
+                        style={{ width: 130, cursor: 'pointer', userSelect: 'none' }}
+                        onClick={onToggleTimes}
+                        title="Click to toggle relative / absolute time"
+                    >When {relativeTimes ? '⏱' : '📅'}</th>
                     <th style={{ width: 80 }}>Status</th>
                     <th style={{ width: 130 }}></th>
                 </tr>
@@ -1920,6 +1987,13 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                     const rowStyle = it.queue_color
                         ? { '--queue-color': it.queue_color }
                         : {};
+                    const tms = it.played_at_ms || it.created_at_ms;
+                    const dateLabel = relativeTimes
+                        ? relativeTime(tms, it.time)
+                        : it.time;
+                    const dateTitle = relativeTimes
+                        ? it.time
+                        : (tms ? new Date(tms).toLocaleString() : it.time);
                     return (
                         <tr key={it.id} className={rowCls} style={rowStyle}>
                             <td className="col-text" title={it.text} dangerouslySetInnerHTML={{ __html: it.text }} />
@@ -1930,7 +2004,10 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                                     style={it.queue_color ? { borderLeftColor: it.queue_color } : {}}
                                 >{truncateQueue(it.queue)}</code>
                             </td>
-                            <td className="col-date">{it.time}</td>
+                            <td
+                                className="col-date"
+                                title={dateTitle + ' (click header to toggle)'}
+                            >{dateLabel}</td>
                             <td>{status}</td>
                             <td>
                                 <div style={{ display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'flex-end' }}>
@@ -1962,13 +2039,39 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
     );
 }
 
-// History card: text on top, single footer row carrying everything else
-// (status pill, queue chip, time, action buttons). Header/footer split
-// was removed -- the time and status were visually homeless at the top
-// and a single explicit footer makes the action affordances cluster
-// where the eye expects them. The queue's accent color drives a 4px
-// left stripe via the --queue-color CSS variable.
-function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
+// Convert an epoch-ms timestamp into a "3 hours ago" / "2 minutes ago"
+// string. Truncated to the largest sensible unit; falls back to the
+// formatted absolute time when the timestamp is missing or in the
+// future (clock skew). Mirrors the server-side ``relative_time`` so the
+// language matches the auto-label prefix in spoken output.
+function relativeTime(epochMs, absoluteFallback) {
+    if (!epochMs) return absoluteFallback || '';
+    const now = Date.now();
+    const diff = Math.floor((now - epochMs) / 1000);
+    if (diff < 0) return absoluteFallback || '';
+    if (diff < 5) return 'just now';
+    if (diff < 60) return diff + ' seconds ago';
+    if (diff < 120) return 'a minute ago';
+    if (diff < 3600) return Math.floor(diff / 60) + ' minutes ago';
+    if (diff < 7200) return 'an hour ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + ' hours ago';
+    if (diff < 172800) return 'yesterday';
+    if (diff < 604800) return Math.floor(diff / 86400) + ' days ago';
+    if (diff < 2592000) return Math.floor(diff / 604800) + ' weeks ago';
+    if (diff < 31536000) return Math.floor(diff / 2592000) + ' months ago';
+    return Math.floor(diff / 31536000) + ' years ago';
+}
+
+// History card: header carries the full queue name on the left and a
+// click-to-toggle time on the right; text body; footer with status +
+// action buttons.
+//
+// Time toggle is page-wide via localStorage so flipping one card
+// flips them all -- two cards showing different formats would read
+// as inconsistent data. ``relativeTimes`` (true/false) is owned by
+// the parent HistoryView and threaded through; the card just clicks
+// the toggle on its own time pill.
+function ItemCard({ item, isPlaying, isSpeaking, onPlay, relativeTimes, onToggleTimes }) {
     const interpClass = item.interp_class || '';
     const cls = [
         'card',
@@ -1979,17 +2082,36 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
     const statusClass = item.played ? 'played' : 'pending';
     const statusText = isSpeaking ? 'Speaking' : (item.played ? 'Played' : 'Pending');
     const cardStyle = item.queue_color ? { '--queue-color': item.queue_color } : {};
+    // Prefer played-at for the time pill ("when it was played"); fall
+    // back to created-at for items still in flight. The absolute string
+    // comes from the server's format_time so the language matches the
+    // table view's column header.
+    const timeMs = item.played_at_ms || item.created_at_ms;
+    const absoluteLabel = item.time;
+    const timeLabel = relativeTimes
+        ? relativeTime(timeMs, absoluteLabel)
+        : absoluteLabel;
+    const timeTitle = relativeTimes ? absoluteLabel : (
+        timeMs ? new Date(timeMs).toLocaleString() : absoluteLabel
+    );
     return (
         <div className={cls} data-id={item.id} data-interp={interpClass} style={cardStyle}>
+            <div className="card-header card-header-row">
+                <code
+                    className="queue-chip queue-chip-full"
+                    title={item.queue}
+                    style={item.queue_color ? { borderLeftColor: item.queue_color } : {}}
+                >{item.queue}</code>
+                <button
+                    type="button"
+                    className="time-toggle"
+                    onClick={onToggleTimes}
+                    title={timeTitle + ' (click to toggle absolute / relative)'}
+                >{timeLabel}</button>
+            </div>
             <div className="card-text" dangerouslySetInnerHTML={{ __html: item.text }} />
             <div className="card-footer">
                 <span className={'status ' + statusClass}>{statusText}</span>
-                <code
-                    className="queue-chip"
-                    title={item.queue}
-                    style={item.queue_color ? { borderLeftColor: item.queue_color } : {}}
-                >{truncateQueue(item.queue)}</code>
-                <span className="time">{item.time}</span>
                 <div className="card-footer-actions">
                     {item.tts_error && (
                         <span
@@ -4564,6 +4686,17 @@ async def api_items():
         # queue id so we don't query settings per item.
         queue_color = _queue_color_for(queue)
 
+        # Played-at epoch ms so the UI can render "when played" and
+        # compute relative time client-side. Falls back to created_at_ms
+        # so cards always have a time to show even before playback.
+        played_at_ms = None
+        played_at_iso = item.get("played_at")
+        if played_at_iso:
+            try:
+                played_at_ms = int(datetime.fromisoformat(played_at_iso).timestamp() * 1000)
+            except (ValueError, TypeError):
+                pass
+
         result.append({
             "id": item["id"],
             "text": escape_html(strip_tone_tokens(item["text"])),
@@ -4573,6 +4706,7 @@ async def api_items():
             "raw_text": strip_tone_tokens(item["text"]),
             "time": format_time(item["created_at"]),
             "created_at_ms": created_at_ms,
+            "played_at_ms": played_at_ms,
             "played": bool(item["played_at"]),
             "has_audio": has_audio,
             "metadata": render_metadata(item.get("metadata")),
