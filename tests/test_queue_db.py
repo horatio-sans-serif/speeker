@@ -27,6 +27,7 @@ from speeker.queue_db import (
     get_currently_playing,
     search,
     search_fuzzy,
+    update_metadata,
 )
 
 
@@ -427,6 +428,34 @@ class TestMarkPlayed:
         assert len(get_pending_for_session("mysession")) == 1
         mark_played(item_id)
         assert len(get_pending_for_session("mysession")) == 0
+
+
+class TestUpdateMetadata:
+    """Tests for update_metadata: shallow JSON merge into queue.metadata."""
+
+    def test_merges_into_empty(self, temp_db):
+        """enqueue with no metadata leaves the column NULL; the merge then
+        equals the patch verbatim."""
+        item_id = enqueue("Test")
+        merged = update_metadata(item_id, {"tts_attempts": 1})
+        assert merged == {"tts_attempts": 1}
+
+    def test_preserves_existing_keys(self, temp_db):
+        item_id = enqueue("Test", metadata={"queue": "X", "engine": "polly"})
+        merged = update_metadata(item_id, {"tts_attempts": 2})
+        assert merged == {"queue": "X", "engine": "polly", "tts_attempts": 2}
+
+    def test_overwrites_same_key(self, temp_db):
+        item_id = enqueue("Test", metadata={"tts_attempts": 1})
+        merged = update_metadata(item_id, {"tts_attempts": 3})
+        assert merged["tts_attempts"] == 3
+
+    def test_persists_to_db(self, temp_db):
+        item_id = enqueue("Test")
+        update_metadata(item_id, {"tts_error": "Polly throttled"})
+        # Reread via the pending-items helper to confirm round-trip.
+        pending = get_pending_for_session("default")
+        assert pending[0]["metadata"]["tts_error"] == "Polly throttled"
 
 
 class TestGetPendingCount:

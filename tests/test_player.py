@@ -1112,6 +1112,94 @@ class TestProcessQueue:
         mock_mark.assert_called()
 
 
+class TestProcessQueueRetryOnTtsError:
+    """Daemon's retry policy for TTSError-raising items.
+
+    Under the attempt cap: increment metadata.tts_attempts, leave the
+    item pending (don't mark_played) so the next poll retries it.
+    At the cap: write metadata.tts_error, save tone WAV if applicable,
+    mark played so the queue advances.
+    """
+
+    @patch("speeker.player.set_last_utterance_time")
+    @patch("speeker.player.mark_played")
+    @patch("speeker.player.update_metadata")
+    @patch("speeker.player.speak_text")
+    @patch("speeker.player.get_settings")
+    @patch("speeker.player.get_pending_for_session")
+    @patch("speeker.player.get_sessions_with_pending")
+    @patch("speeker.player.get_player_config")
+    def test_tts_error_under_cap_keeps_pending(
+        self, mock_player_cfg, mock_sessions, mock_pending, mock_settings,
+        mock_speak, mock_update_meta, mock_mark, mock_set_time,
+    ):
+        """When speak_text raises TTSError and attempts < max, the item
+        stays pending (NOT marked played) and tts_attempts increments."""
+        from speeker.player import process_queue, TTSError
+        mock_player_cfg.return_value = {"tts_max_attempts": 3}
+        mock_sessions.return_value = ["session1"]
+        mock_pending.return_value = [
+            {"id": 42, "text": "Hello", "created_at": "2024-01-01 12:00:00",
+             "metadata": {"queue": "session1"}},
+        ]
+        mock_settings.return_value = {
+            "voice": "Joanna", "speed": 1.0, "intro_sound": False,
+            "engine": "polly",
+        }
+        mock_speak.side_effect = TTSError("Polly throttled")
+
+        process_queue(verbose=False)
+
+        # tts_attempts bumped to 1.
+        mock_update_meta.assert_called_with(42, {"tts_attempts": 1})
+        # NOT marked played -- the next poll retries.
+        mock_mark.assert_not_called()
+
+    @patch("speeker.player.set_last_utterance_time")
+    @patch("speeker.player.mark_played")
+    @patch("speeker.player.update_metadata")
+    @patch("speeker.player._save_tone_only_fallback")
+    @patch("speeker.player.speak_text")
+    @patch("speeker.player.get_settings")
+    @patch("speeker.player.get_pending_for_session")
+    @patch("speeker.player.get_sessions_with_pending")
+    @patch("speeker.player.get_player_config")
+    def test_tts_error_at_cap_surfaces_and_marks_played(
+        self, mock_player_cfg, mock_sessions, mock_pending, mock_settings,
+        mock_speak, mock_save_tone, mock_update_meta, mock_mark, mock_set_time,
+    ):
+        """When prior attempts reach the cap and a new TTSError occurs,
+        the daemon gives up: writes tts_error, calls the tone-WAV
+        fallback (no-op for body-only items), and marks the row played
+        so the queue advances."""
+        from speeker.player import process_queue, TTSError
+        mock_player_cfg.return_value = {"tts_max_attempts": 3}
+        mock_sessions.return_value = ["session1"]
+        # This item already had 2 prior attempts -- the third raise
+        # finalizes it.
+        mock_pending.return_value = [
+            {"id": 42, "text": "Hello", "created_at": "2024-01-01 12:00:00",
+             "metadata": {"queue": "session1", "tts_attempts": 2}},
+        ]
+        mock_settings.return_value = {
+            "voice": "Joanna", "speed": 1.0, "intro_sound": False,
+            "engine": "polly",
+        }
+        mock_speak.side_effect = TTSError("Polly down")
+
+        process_queue(verbose=False)
+
+        # Final attempt count + error recorded.
+        update_args = mock_update_meta.call_args.args
+        assert update_args[0] == 42
+        assert update_args[1]["tts_attempts"] == 3
+        assert "Polly down" in update_args[1]["tts_error"]
+        # Marked played -- the queue moves on.
+        mock_mark.assert_called_once_with(42)
+        # Tone-WAV fallback consulted (body-only here, so no-op inside).
+        mock_save_tone.assert_called_once()
+
+
 class TestMainFunction:
     """Tests for main entry point."""
 
@@ -1188,14 +1276,26 @@ class TestGenerateTTS:
         assert path is not None
         path.unlink()
 
-    def test_generate_tts_error(self, tmp_path):
+    def test_generate_tts_error_raises_tts_error(self, tmp_path):
+        """An engine exception is now surfaced as ``TTSError`` (with the
+        original chained via ``__cause__``). The daemon catches this to
+        drive its retry policy; previously errors were silently swallowed
+        and only logged under ``--verbose``."""
         from speeker import player
         rec = _PlayerRecordingEngine()
-        rec.generate = MagicMock(side_effect=Exception("TTS error"))
+        rec.generate = MagicMock(side_effect=Exception("boom"))
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
              patch.object(player, "get_engine", return_value=rec):
-            path = player.generate_tts("Hello world", verbose=False)
-        assert path is None
+            with pytest.raises(player.TTSError) as exc_info:
+                player.generate_tts(
+                    "Hello world", voice="Joanna", engine="polly", verbose=False,
+                )
+        # Context attached so the daemon can include it in metadata.tts_error.
+        assert exc_info.value.engine == "polly"
+        assert exc_info.value.voice == "Joanna"
+        assert "boom" in str(exc_info.value)
+        # Original exception chained for downstream debugging.
+        assert isinstance(exc_info.value.__cause__, Exception)
 
     def test_generate_tts_calls_apply_effects_with_sample_rate(self, tmp_path):
         """The effects hook sits between the speed resample and the
@@ -1258,14 +1358,19 @@ class TestSpeakTextPlayer:
     def test_speak_text_with_tones(self, mock_extract, mock_play_tone):
         """speak_text passes the tone-duration override through to
         play_tone_tokens. None (the default) means "use play_tone_tokens'
-        own default" -- the 0.8s used for $Note prefix tones before TTS."""
-        from speeker.player import speak_text as player_speak_text
+        own default" -- the 0.8s used for $Note prefix tones before TTS.
+
+        TTS now raises TTSError on failure; the leading tone must STILL
+        have played (it was synthesized in the parallel thread before
+        the error was checked)."""
+        from speeker.player import speak_text as player_speak_text, TTSError
 
         mock_extract.return_value = (["C4", "E4"], "Hello", [])
 
         with patch("speeker.player.generate_tts") as mock_gen:
-            mock_gen.return_value = None
-            player_speak_text("$C4 $E4 Hello", verbose=False)
+            mock_gen.side_effect = TTSError("boom", engine="polly", voice="Joanna")
+            with pytest.raises(TTSError):
+                player_speak_text("$C4 $E4 Hello", verbose=False)
 
         mock_play_tone.assert_called_once_with(["C4", "E4"], False, duration=None)
 
@@ -1281,15 +1386,17 @@ class TestSpeakTextPlayer:
         mock_play_tone.assert_called_once_with(["G4", "E4", "C5"], False, duration=0.18)
 
     @patch("speeker.player.generate_tts")
-    def test_speak_text_tts_failure(self, mock_gen):
-        """Test speak_text handles TTS failure."""
-        from speeker.player import speak_text as player_speak_text
+    def test_speak_text_propagates_tts_error(self, mock_gen):
+        """speak_text now lets TTSError propagate so process_queue can
+        record the failure and decide whether to retry. Previously it
+        returned None and the daemon had no way to distinguish failure
+        from tone-only success."""
+        from speeker.player import speak_text as player_speak_text, TTSError
 
-        mock_gen.return_value = None
+        mock_gen.side_effect = TTSError("boom")
 
-        result = player_speak_text("Hello world", verbose=False)
-
-        assert result is None
+        with pytest.raises(TTSError):
+            player_speak_text("Hello world", verbose=False)
 
 
 class TestPlayToneTokens:

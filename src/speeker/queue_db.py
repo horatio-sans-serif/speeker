@@ -248,6 +248,35 @@ def mark_played(item_id: int) -> None:
         conn.commit()
 
 
+def update_metadata(item_id: int, patches: dict) -> dict:
+    """Merge ``patches`` into the item's metadata JSON column.
+
+    Returns the merged metadata dict. Existing keys are overwritten by
+    ``patches`` (shallow merge). Used by the daemon to record
+    ``tts_attempts`` and ``tts_error`` on failed utterances without
+    disturbing the rest of metadata (queue, engine, voice, ...).
+    """
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT metadata FROM queue WHERE id = ?",
+            (item_id,),
+        )
+        row = cursor.fetchone()
+        current: dict = {}
+        if row and row["metadata"]:
+            try:
+                current = json.loads(row["metadata"]) or {}
+            except (json.JSONDecodeError, TypeError):
+                current = {}
+        merged = {**current, **patches}
+        conn.execute(
+            "UPDATE queue SET metadata = ? WHERE id = ?",
+            (json.dumps(merged), item_id),
+        )
+        conn.commit()
+    return merged
+
+
 def get_pending_count() -> int:
     """Get count of unplayed items across all sessions."""
     with get_connection() as conn:

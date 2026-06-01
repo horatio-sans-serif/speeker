@@ -342,6 +342,22 @@ HTML_TEMPLATE = """
             color: var(--warn);
             font-weight: 500;
         }
+        /* "TTS failed" badge that appears next to the (disabled) Play
+           button when the daemon gave up retrying. Borrows the .status
+           pill geometry and lifts it onto an error tint so it reads as
+           a failure rather than just a state label. */
+        .tts-error-badge {
+            display: inline-block;
+            padding: 2px 9px;
+            border-radius: 10px;
+            background: rgba(220, 70, 70, 0.15);
+            color: var(--warn);
+            font-size: 0.78em;
+            font-weight: 600;
+            letter-spacing: 0.02em;
+            cursor: help;
+            user-select: none;
+        }
         .score {
             color: var(--accent);
             font-size: 0.82em;
@@ -1680,12 +1696,20 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                             <td>{status}</td>
                             <td>
                                 <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                    {it.tts_error && (
+                                        <span
+                                            className="tts-error-badge"
+                                            title={'TTS failed: ' + it.tts_error}
+                                        >TTS failed</span>
+                                    )}
                                     <DownloadBtn itemId={it.id} hasAudio={it.has_audio} small />
                                     <button
                                         className="play-btn"
                                         onClick={() => onPlay(it.id)}
                                         disabled={!it.has_audio}
-                                        title={it.has_audio ? 'Play' : 'No audio'}
+                                        title={it.has_audio
+                                            ? 'Play'
+                                            : (it.tts_error ? 'TTS failed: ' + it.tts_error : 'No audio')}
                                     >
                                         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                                     </button>
@@ -1721,12 +1745,20 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
                     <div className="metadata" dangerouslySetInnerHTML={{ __html: item.metadata }} />
                 </div>
                 <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                    {item.tts_error && (
+                        <span
+                            className="tts-error-badge"
+                            title={'TTS failed: ' + item.tts_error}
+                        >TTS failed</span>
+                    )}
                     <DownloadBtn itemId={item.id} hasAudio={item.has_audio} />
                     <button
                         className="play-btn"
                         onClick={onPlay}
                         disabled={!item.has_audio}
-                        title={item.has_audio ? 'Play' : 'No audio'}
+                        title={item.has_audio
+                            ? 'Play'
+                            : (item.tts_error ? 'TTS failed: ' + item.tts_error : 'No audio')}
                     >
                         <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
                     </button>
@@ -3803,6 +3835,14 @@ async def api_items():
             except (ValueError, TypeError):
                 pass
 
+        # TTS failure surfaced from the daemon's retry policy. Present
+        # only after the attempt cap is reached -- before that, the row
+        # stays pending and retries on each poll. The UI uses this to
+        # render a "TTS failed" badge next to the (disabled) Play button
+        # so users understand why audio is missing.
+        meta_dict = item.get("metadata") or {}
+        tts_error_msg = meta_dict.get("tts_error") if isinstance(meta_dict, dict) else None
+
         result.append({
             "id": item["id"],
             "text": escape_html(strip_tone_tokens(item["text"])),
@@ -3815,6 +3855,7 @@ async def api_items():
             # CSS modifier for the interpretation accent stripe (left border).
             # Empty string when no outcome cue was set on the item.
             "interp_class": interpretation_class(item.get("metadata")),
+            "tts_error": tts_error_msg if isinstance(tts_error_msg, str) else None,
         })
 
     return JSONResponse({

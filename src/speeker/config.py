@@ -18,6 +18,13 @@ DEFAULT_CONFIG = {
     },
     "player": {
         "model_idle_timeout_minutes": 0,  # 0 = never unload
+        # Max times the daemon will retry an utterance whose TTS engine
+        # raised an exception before giving up. Failures within the cap
+        # leave the item pending so the next poll cycle (0.5s later)
+        # retries it. After the cap, the item is marked played with
+        # ``metadata.tts_error`` set so the UI can surface "TTS failed".
+        # Set to 1 to disable retry.
+        "tts_max_attempts": 3,
     },
     "polly": {
         "region": None,    # None = boto3 default (profile/env region)

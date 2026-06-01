@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import get_auto_label_config
+from .config import get_auto_label_config, get_player_config
 from .engines import get_engine, prepare_payload, unload_all
 from .ssml import looks_like_ssml
 from .paths import (
@@ -42,6 +42,7 @@ from .queue_db import (
     set_currently_playing,
     set_last_utterance_time,
     cleanup_old_entries,
+    update_metadata,
 )
 
 # Timing
@@ -341,6 +342,24 @@ def play_audio(audio_path: Path, verbose: bool = False) -> bool:
         return False
 
 
+class TTSError(Exception):
+    """Raised by ``generate_tts`` when audio synthesis fails.
+
+    Carries the engine name, voice, and a short text snippet so a single
+    line in /tmp/speeker-player.err identifies the failed utterance. The
+    daemon catches this to drive its retry policy (see ``process_queue``).
+    Callers that don't care about retry can catch ``Exception`` -- TTSError
+    inherits from it.
+    """
+
+    def __init__(self, message: str, *, engine: str | None = None,
+                 voice: str | None = None, text: str | None = None) -> None:
+        super().__init__(message)
+        self.engine = engine
+        self.voice = voice
+        self.text = text
+
+
 def generate_tts(
     text: str,
     voice: str | None = None,
@@ -352,12 +371,18 @@ def generate_tts(
     is_ssml: bool = False,
     polly_engine: str | None = None,
     effects_preset: str | None = None,
-) -> Path | None:
+) -> Path:
     """Generate TTS audio for text using the named engine.
 
     ``effects_preset`` -- when supplied, overrides the saved effects
     preset for this one utterance (used by ``/api/effects/try`` to
     preview an unsaved selection without mutating ``config.json``).
+
+    Raises ``TTSError`` on any synthesis failure -- the underlying
+    engine exception is chained via ``__cause__``. Errors are logged to
+    stderr unconditionally (not gated on ``verbose``) so failures stay
+    visible in /tmp/speeker-player.err even when the daemon was launched
+    without ``--verbose``.
     """
     try:
         import numpy as np
@@ -422,9 +447,21 @@ def generate_tts(
                 return Path(f.name)
 
     except Exception as e:
-        if verbose:
-            print(f"[ERROR] TTS failed: {e}", file=sys.stderr)
-        return None
+        # Always log -- the daemon usually runs without --verbose, so a
+        # silent return makes failures invisible (cards lose their Play
+        # button with no clue why). One concise line per failure makes
+        # /tmp/speeker-player.err greppable.
+        snippet = (text or "")[:60].replace("\n", " ")
+        suffix = "..." if text and len(text) > 60 else ""
+        print(
+            f"[TTS-ERROR] engine={engine or 'default'} voice={voice or 'default'}"
+            f" err={type(e).__name__}: {e} text={snippet!r}{suffix}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise TTSError(
+            str(e), engine=engine, voice=voice, text=text,
+        ) from e
 
 
 def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8) -> Path:
@@ -669,15 +706,16 @@ def speak_text(
         return save_path
 
     # Only-speech case: no leading tone to overlap, run sequentially.
-    # Trailing tones still play after the speech finishes.
+    # Trailing tones still play after the speech finishes. ``generate_tts``
+    # raises ``TTSError`` on failure -- we let it propagate so
+    # ``process_queue`` can drive the retry policy. The trailing tones
+    # are skipped on TTS failure (no speech to bookend).
     if not leading_tones:
         audio_path = generate_tts(
             clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose,
             engine=engine, is_ssml=is_ssml, polly_engine=polly_engine,
             effects_preset=effects_preset,
         )
-        if audio_path is None:
-            return None
         try:
             play_audio(audio_path, verbose)
         finally:
@@ -710,12 +748,16 @@ def speak_text(
     gen_thread.join()
 
     if error[0] is not None:
-        if verbose:
-            print(f"[ERROR] TTS thread raised: {error[0]}", file=sys.stderr)
-        return None
+        # The leading tone already played. Surface the failure so
+        # ``process_queue`` can record it and decide whether to retry.
+        # Already a ``TTSError`` if it came from generate_tts; otherwise
+        # wrap so callers always see a consistent type.
+        if isinstance(error[0], TTSError):
+            raise error[0]
+        raise TTSError(
+            str(error[0]), engine=engine, voice=voice, text=clean_text,
+        ) from error[0]
     audio_path = result[0]
-    if audio_path is None:
-        return None
     try:
         play_audio(audio_path, verbose)
     finally:
@@ -852,6 +894,29 @@ def build_session_script(
     return lines
 
 
+def _save_tone_only_fallback(item: dict, tone_duration: float | None) -> None:
+    """Record the cached tone WAV as the item's audio_path, if applicable.
+
+    Used after a giving-up TTS failure on an item whose text starts with
+    ``$Note`` tone tokens. The leading tone played before TTS failed --
+    saving its cached WAV here lets the history Play button replay the
+    audible portion the listener actually heard. No-op for body-only
+    items (no tone to fall back to).
+    """
+    try:
+        tokens, _body, _trailing = extract_tone_tokens(item.get("text") or "")
+        if not tokens:
+            return
+        cache_path = generate_combined_tones_from_tokens(
+            tokens, duration=(tone_duration or 0.8),
+        )
+        if cache_path and Path(cache_path).exists():
+            update_audio_path(item["id"], Path(cache_path))
+    except Exception:
+        # Best-effort -- a failure here just leaves audio_path NULL.
+        pass
+
+
 def update_audio_path(item_id: int, audio_path: Path) -> None:
     """Update the audio_path for a queue item."""
     with get_connection() as conn:
@@ -899,7 +964,13 @@ def process_queue(verbose: bool = False) -> int:
             print("[INFO] Playing intro sound", file=sys.stderr)
         intro_queue = sessions[0] if sessions else None
         play_audio(get_intro_sound(queue=intro_queue), verbose)
-        speak_text("This is Claude Code.", verbose=verbose, engine=global_settings["engine"])
+        # The "This is Claude Code." greeting is a nicety, not a guarantee.
+        # Swallow TTSError so a Polly blip on the greeting doesn't abort
+        # the whole batch -- the intro tone already announced the batch.
+        try:
+            speak_text("This is Claude Code.", verbose=verbose, engine=global_settings["engine"])
+        except TTSError:
+            pass
         time.sleep(PAUSE_BETWEEN_SESSIONS)
 
     # Auto-label state: seeded from the DB, then updated in memory between
@@ -915,6 +986,12 @@ def process_queue(verbose: bool = False) -> int:
         items = get_pending_for_session(session_id)
         if not items:
             continue
+
+        # Items whose TTS raised under the retry cap. Populated by the
+        # speak_text TTSError handler below; consumed by the mark_played
+        # loop at session end so retried rows stay played_at=NULL and
+        # get_pending_for_session picks them up on the next poll.
+        pending_retry_ids: set[int] = set()
 
         # Get settings for this session
         settings = get_settings(session_id)
@@ -1016,6 +1093,7 @@ def process_queue(verbose: bool = False) -> int:
             )
             if current_item_id is not None:
                 set_currently_playing(current_item_id)
+            tts_error: TTSError | None = None
             try:
                 result = speak_text(
                     line, voice=line_voice, speed=speed, save_path=save_path, verbose=verbose,
@@ -1023,9 +1101,43 @@ def process_queue(verbose: bool = False) -> int:
                     effects_preset=line_effects_preset,
                     tone_duration=line_tone_duration,
                 )
+            except TTSError as e:
+                # Caught here so other items in the batch still process.
+                # Already logged in generate_tts; we just track that this
+                # one failed for the retry-or-surface decision below.
+                tts_error = e
+                result = None
             finally:
                 if current_item_id is not None:
                     clear_currently_playing()
+
+            if tts_error is not None and 0 <= item_idx < len(items):
+                # Failure path: increment attempt counter in metadata. If
+                # under the cap, leave the item PENDING (don't append to
+                # played_ids) so the next daemon poll retries it. If at
+                # the cap, save the tone WAV (if any played before the
+                # failure) so the audible portion replays from history,
+                # record the error message, and let the outer mark_played
+                # loop finalize it.
+                fail_item = items[item_idx]
+                max_attempts = max(
+                    1, int(get_player_config().get("tts_max_attempts", 3) or 3)
+                )
+                prior_meta = fail_item.get("metadata") or {}
+                attempts = int(prior_meta.get("tts_attempts", 0) or 0) + 1
+                if attempts < max_attempts:
+                    update_metadata(fail_item["id"], {"tts_attempts": attempts})
+                    pending_retry_ids.add(fail_item["id"])
+                else:
+                    # Give up. Record the error + save tone WAV for replay.
+                    update_metadata(fail_item["id"], {
+                        "tts_attempts": attempts,
+                        "tts_error": str(tts_error),
+                    })
+                    _save_tone_only_fallback(
+                        fail_item, line_tone_duration,
+                    )
+                continue  # Skip the success bookkeeping below.
 
             if result is not None or save_path is None:
                 total_played += 1
@@ -1057,8 +1169,13 @@ def process_queue(verbose: bool = False) -> int:
                     if actual is not None:
                         update_audio_path(items[item_idx]["id"], actual)
 
-        # Mark items as played
+        # Mark items as played -- except those left pending for retry.
+        # ``pending_retry_ids`` was populated above when speak_text raised
+        # TTSError under the attempt cap; those rows stay played_at=NULL
+        # so get_pending_for_session picks them up on the next poll.
         for item in items:
+            if item["id"] in pending_retry_ids:
+                continue
             mark_played(item["id"])
 
         # Advance the in-memory auto-label state so the next session in this
@@ -1118,7 +1235,10 @@ def release_lock(lock_path: Path) -> None:
 
 def run_daemon(verbose: bool = False) -> None:
     """Run as a daemon - watch queue and process items immediately."""
-    from .config import get_player_config
+    # Local import (despite the module-level one) so tests can patch
+    # ``speeker.config.get_player_config`` and have run_daemon see the
+    # mock. Without this, the module-level binding shadows the patch.
+    from .config import get_player_config  # noqa: F811
     from .paths import restart_sentinel_path
 
     lock_path = acquire_lock()

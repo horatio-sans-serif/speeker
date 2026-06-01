@@ -466,6 +466,35 @@ class TestApiItemsRoute:
         assert item["text"] == "Test message"
         assert item["played"] is False
         assert item["queue"] == "myqueue"
+        # No metadata.tts_error -> tts_error is None.
+        assert item["tts_error"] is None
+
+    @patch("speeker.web.get_history")
+    def test_api_items_surfaces_tts_error(self, mock_history, client):
+        """When the daemon recorded ``metadata.tts_error`` after the retry
+        cap, /api/items must surface it so the UI can render the "TTS
+        failed" badge next to the disabled Play button."""
+        mock_history.return_value = [
+            {
+                "id": 7,
+                "text": "Hello",
+                "created_at": "2024-01-15T14:30:00",
+                "played_at": "2024-01-15T14:30:05",
+                "audio_path": None,
+                "session_id": "myqueue",
+                "metadata": {
+                    "queue": "myqueue",
+                    "tts_attempts": 3,
+                    "tts_error": "Polly throttle exceeded",
+                },
+            }
+        ]
+        response = client.get("/api/items")
+        data = response.json()
+        item = data["items"][0]
+        assert item["tts_error"] == "Polly throttle exceeded"
+        assert item["has_audio"] is False
+        assert item["played"] is True
 
     @patch("speeker.web.get_history")
     def test_api_items_default_queue(self, mock_history, client):
