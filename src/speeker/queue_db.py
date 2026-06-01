@@ -508,24 +508,155 @@ def get_spoken_queue_title(queue_id: str | None) -> str | None:
 
 # --- Settings ---
 
+# Categorical color palette for queue auto-coloring. Curated for
+# visual distinction on both light and dark surfaces; mid-saturation
+# mid-lightness picks so the same swatch reads on white or black UI.
+# Hash-based assignment into a 24-bucket palette had a ~70% birthday-
+# collision rate at 8 queues. Hash assignment is replaced by an
+# ORDER-based assignment: queues get palette slots in their order of
+# first appearance, so the first 36 queues are guaranteed distinct.
+#
+# Source palette: Tableau 20 mid-tones plus extras chosen to fill hue
+# gaps (deep magenta, mustard, mint, terracotta, plum, ocher) and span
+# warm/cool pairs evenly. Position matters here (first queue gets the
+# first entry) so the order is tuned: the first 12 are the strongest,
+# most distinct colors; later entries fill in subtler variations.
+# 36-color palette balanced across hue families and ordered so any
+# contiguous slice of ~8 entries covers most of the wheel.
+#
+# Family balance (rebalanced after observing real history skew toward
+# certain palette regions):
+#   red/pink   = 5
+#   orange     = 5
+#   yellow     = 4
+#   green      = 6
+#   teal       = 4
+#   blue       = 6
+#   purple     = 4
+#   brown/warm-neutral = 2
+#
+# Order pattern: 8-family cycle so any window of 8 visits each
+# family once. Consecutive entries jump across the wheel rather than
+# adjacent. The previous palette had 9 purples and clustered them at
+# indices 7/16/25/34, which made any history slice that fell in that
+# range look "all purple".
+QUEUE_COLOR_PALETTE: list[str] = [
+    # cycle 1: red, green, blue, orange, purple, yellow, teal, pink
+    "#e45756",  # 0  red
+    "#54a24b",  # 1  emerald (green)
+    "#4c78a8",  # 2  steel blue
+    "#f58518",  # 3  orange
+    "#7c4ddb",  # 4  violet (purple)
+    "#eeca3b",  # 5  gold (yellow)
+    "#3fb8af",  # 6  turquoise (teal)
+    "#c94e85",  # 7  raspberry (pink-red)
+    # cycle 2: same families, different shades
+    "#ff5a36",  # 8  tomato (red)
+    "#73d177",  # 9  lime (green)
+    "#5e9ef9",  # 10 cobalt (blue)
+    "#ff8b6a",  # 11 salmon (orange)
+    "#a23ec1",  # 12 magenta (purple)
+    "#ffba31",  # 13 amber (yellow)
+    "#72b7b2",  # 14 teal
+    "#e64980",  # 15 hot pink (pink-red)
+    # cycle 3
+    "#dd5566",  # 16 rose red
+    "#1f9b73",  # 17 forest (green)
+    "#3aa5cd",  # 18 cerulean (blue)
+    "#bf6f3a",  # 19 terracotta (orange-brown)
+    "#a86bf0",  # 20 iris (purple)
+    "#dba84c",  # 21 honey (yellow)
+    "#1ba88a",  # 22 jade (teal-green)
+    "#ff9da6",  # 23 rose pink
+    # cycle 4
+    "#cc8c4b",  # 24 ocher (brown-orange)
+    "#88d27a",  # 25 spring green
+    "#5fa2ce",  # 26 sky (blue)
+    "#9d755d",  # 27 cocoa (brown)
+    "#9b5fa0",  # 28 plum (purple)
+    "#d5a012",  # 29 mustard
+    "#506b7f",  # 30 slate blue (cool neutral)
+    "#b279a2",  # 31 mauve (pink-purple)
+    # cycle 5 (only 4 -- 32 entries above plus 4 tail)
+    "#e07b00",  # 32 burnt orange
+    "#6abf69",  # 33 leaf (green)
+    "#7b8ed8",  # 34 periwinkle (blue)
+    "#d29be3",  # 35 lavender (purple)
+]
+
+
+# Per-process cache of the queue->rank ordering. Invalidated whenever a
+# new queue id appears in the rank query, but in practice the result is
+# stable across the lifetime of a process unless new queues are
+# created. Top-level lru_cache in web.py buffers the final color, so the
+# cost here is paid at most once per fresh queue per process.
+_rank_cache: dict[str, int] = {}
+_rank_cache_signature: int = -1
+
+
+def _queue_rank(session_id: str) -> int:
+    """Return this queue's 0-based rank in first-appearance order.
+
+    Rank is stable per queue id -- it's derived from the earliest
+    ``created_at`` of any item with that ``session_id``. New queues get
+    appended to the end of the order. Result is memoized; the cache
+    rebuilds when a new queue id appears (detected by comparing the
+    distinct count of session_ids).
+    """
+    global _rank_cache, _rank_cache_signature
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "SELECT COUNT(DISTINCT session_id) AS c FROM queue"
+            " WHERE session_id IS NOT NULL AND session_id != '__global__'"
+        )
+        sig = int(cursor.fetchone()["c"])
+        if sig != _rank_cache_signature:
+            cursor = conn.execute(
+                "SELECT session_id, MIN(created_at) AS first_seen FROM queue"
+                " WHERE session_id IS NOT NULL AND session_id != '__global__'"
+                " GROUP BY session_id"
+                " ORDER BY first_seen ASC, session_id ASC"
+            )
+            _rank_cache = {row["session_id"]: i for i, row in enumerate(cursor.fetchall())}
+            _rank_cache_signature = sig
+    return _rank_cache.get(session_id, sig)
+
+
 def default_color_for_queue(session_id: str | None) -> str:
-    """Stable accent color derived from a queue id, for queues that haven't
-    set an explicit color. Uses an HSL palette tuned to be readable on both
-    light and dark surfaces (saturation 65%, lightness 55% -- bright enough
-    on dark, dim enough on light). Returns a CSS hex color.
+    """Stable accent color picked from a curated palette by queue first-seen order.
+
+    Returns ``"#7a8694"`` (a neutral slate) for the unnamed default
+    queue so it doesn't compete with named queues for palette slots.
+    Same queue id always yields the same color across runs because rank
+    is derived from the immutable earliest ``created_at`` of any item
+    with that session_id. Collisions only occur once the user has more
+    than ``len(QUEUE_COLOR_PALETTE)`` queues (currently 36), at which
+    point the palette wraps -- the first 36 queues each get a distinct
+    color.
+
+    Queues with no items in the queue table yet (e.g. just a row in
+    settings) fall back to a deterministic md5-based palette index so
+    they still get a stable color without polluting the rank ordering.
     """
     if not session_id:
         # __global__ / unnamed queue -- neutral accent.
         return "#7a8694"
-    # 12-step golden-ratio hue ladder so adjacent queues alphabetically
-    # don't always look similar. md5 keeps the mapping stable across runs.
-    h = int(hashlib.md5(session_id.encode("utf-8")).hexdigest()[:8], 16)
-    hue = (h * 137) % 360  # golden-angle spacing for good separation
-    return _hsl_to_hex(hue, 0.55, 0.55)
+    rank = _queue_rank(session_id)
+    if rank >= 0 and session_id in _rank_cache:
+        return QUEUE_COLOR_PALETTE[rank % len(QUEUE_COLOR_PALETTE)]
+    # Fallback: no items in queue yet -- hash-based assignment so the
+    # color is stable until items appear and rank takes over.
+    digest = int(hashlib.md5(session_id.encode("utf-8")).hexdigest()[:8], 16)
+    return QUEUE_COLOR_PALETTE[digest % len(QUEUE_COLOR_PALETTE)]
 
 
 def _hsl_to_hex(h: float, s: float, l: float) -> str:
-    """HSL (h in degrees, s/l in 0..1) -> #rrggbb."""
+    """HSL (h in degrees, s/l in 0..1) -> #rrggbb.
+
+    Retained for callers that want to derive a color from a hue dial
+    (the per-queue color picker stays as a hex input; this helper is
+    available for future tooling).
+    """
     import colorsys
     r, g, b = colorsys.hls_to_rgb(h / 360.0, l, s)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"

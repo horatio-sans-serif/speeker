@@ -580,6 +580,41 @@ class TestSettings:
         assert s1["color"] == s2["color"]
         assert s1["color"] != s3["color"]  # different queue -> different color
 
+    def test_color_palette_picks(self, temp_db):
+        """Auto-derived colors come from the curated palette, not HSL math.
+        Verify the returned color is one of the palette entries (so the
+        UI never sees a one-off color out of the chosen spectrum)."""
+        from speeker.queue_db import QUEUE_COLOR_PALETTE
+        names = ["compass-docs", "rm", "speeker", "kb", "doctor-video",
+                 "custom-frontend", "caresense-telehealth-2026", "progress-reporter"]
+        for n in names:
+            c = get_settings(n)["color"]
+            assert c in QUEUE_COLOR_PALETTE, f"{n} -> {c} not in palette"
+
+    def test_color_no_collision_for_first_N_queues(self, temp_db):
+        """First N queues with items (N <= palette size) each get a
+        distinct color. Hash-based assignment couldn't guarantee this
+        (collisions started at queue #2 by birthday probability); the
+        order-based assignment lifts it to a hard guarantee until the
+        palette wraps."""
+        from speeker.queue_db import QUEUE_COLOR_PALETTE
+        from datetime import datetime, timezone, timedelta
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        # Insert items with monotonically increasing created_at so
+        # first-seen ordering matches the insertion order. Without an
+        # explicit gap, the rapid INSERTs in this test could collapse to
+        # the same created_at millisecond and tie-break by session_id.
+        with __import__('speeker.queue_db', fromlist=['get_connection']).get_connection() as conn:
+            for i in range(min(12, len(QUEUE_COLOR_PALETTE))):
+                conn.execute(
+                    "INSERT INTO queue (session_id, text, created_at) VALUES (?, ?, ?)",
+                    (f"queue-{i:02d}", "x", (base + timedelta(seconds=i)).isoformat()),
+                )
+            conn.commit()
+        colors = [get_settings(f"queue-{i:02d}")["color"] for i in range(12)]
+        # All distinct.
+        assert len(set(colors)) == len(colors), f"collision in {colors}"
+
     def test_color_explicit_overrides_auto(self, temp_db):
         """Setting an explicit color overrides the auto-derived value."""
         set_settings(session_id="myq", color="#abcdef")
