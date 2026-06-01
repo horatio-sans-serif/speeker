@@ -279,6 +279,14 @@ HTML_TEMPLATE = """
             cursor: help;
             white-space: nowrap;
         }
+        /* Full-name variant for the Per-queue overrides view, where the
+           whole queue id matters for identification. Allow wrap so long
+           UUID-style ids don't blow the column width. */
+        .queue-chip-full {
+            white-space: normal;
+            word-break: break-all;
+            cursor: default;
+        }
         /* Copy button: ghost circle that pulses to "copied" on success.
            Uses the same 34px footprint as the play / download buttons so
            the action row aligns visually. */
@@ -4022,11 +4030,17 @@ function PerQueueTable({ queues, engines, presets, editing, pending, saveStatus,
                     return (
                         <tr key={q.queue} style={rowStyle}>
                             <td>
+                                {/* Per-queue overrides: full queue id is shown
+                                    untruncated since this view IS the place
+                                    where the user identifies and edits a
+                                    queue's settings -- truncating defeats
+                                    the purpose. The chip's left stripe still
+                                    carries the queue color. */}
                                 <code
-                                    className="queue-chip"
+                                    className="queue-chip queue-chip-full"
                                     title={q.queue}
                                     style={{ borderLeftColor: color }}
-                                >{truncateQueue(q.queue)}</code>
+                                >{q.queue}</code>
                             </td>
                             <td>
                                 {isEd ? (
