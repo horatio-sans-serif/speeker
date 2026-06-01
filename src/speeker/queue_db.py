@@ -1,5 +1,6 @@
 """SQLite-based queue for TTS playback with metadata support."""
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -92,14 +93,29 @@ def _init_db(conn: sqlite3.Connection) -> None:
             intro_sound INTEGER DEFAULT 1,
             speed REAL DEFAULT 1.0,
             voice TEXT DEFAULT NULL,
-            engine TEXT DEFAULT NULL
+            engine TEXT DEFAULT NULL,
+            color TEXT DEFAULT NULL,
+            effects_preset TEXT DEFAULT NULL
         )
     """)
-    # Migration: add engine column if missing
-    try:
-        conn.execute("ALTER TABLE settings ADD COLUMN engine TEXT DEFAULT NULL")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
+    # Migration: add columns to pre-existing databases. Each ALTER is
+    # in its own try/except because sqlite3 raises OperationalError
+    # immediately on the first column that already exists, aborting the
+    # rest of the migration if they're grouped.
+    for ddl in (
+        "ALTER TABLE settings ADD COLUMN engine TEXT DEFAULT NULL",
+        # Per-queue accent color, used by the UI for card stripes / row
+        # accent / queue-picker highlight. NULL falls back to a stable
+        # auto-derived color (see ``default_color_for_queue``).
+        "ALTER TABLE settings ADD COLUMN color TEXT DEFAULT NULL",
+        # Per-queue effects preset override. NULL falls back to the
+        # global ``effects.preset`` config value at speech time.
+        "ALTER TABLE settings ADD COLUMN effects_preset TEXT DEFAULT NULL",
+    ):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_session ON queue(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_queue_played ON queue(played_at)")
     conn.execute("""
@@ -492,10 +508,40 @@ def get_spoken_queue_title(queue_id: str | None) -> str | None:
 
 # --- Settings ---
 
+def default_color_for_queue(session_id: str | None) -> str:
+    """Stable accent color derived from a queue id, for queues that haven't
+    set an explicit color. Uses an HSL palette tuned to be readable on both
+    light and dark surfaces (saturation 65%, lightness 55% -- bright enough
+    on dark, dim enough on light). Returns a CSS hex color.
+    """
+    if not session_id:
+        # __global__ / unnamed queue -- neutral accent.
+        return "#7a8694"
+    # 12-step golden-ratio hue ladder so adjacent queues alphabetically
+    # don't always look similar. md5 keeps the mapping stable across runs.
+    h = int(hashlib.md5(session_id.encode("utf-8")).hexdigest()[:8], 16)
+    hue = (h * 137) % 360  # golden-angle spacing for good separation
+    return _hsl_to_hex(hue, 0.55, 0.55)
+
+
+def _hsl_to_hex(h: float, s: float, l: float) -> str:
+    """HSL (h in degrees, s/l in 0..1) -> #rrggbb."""
+    import colorsys
+    r, g, b = colorsys.hls_to_rgb(h / 360.0, l, s)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+
 def get_settings(session_id: str | None = None) -> dict:
     """Get settings for a session, with global defaults as fallback.
 
-    Returns dict with: intro_sound (bool), speed (float), voice (str), engine (str)
+    Returns dict with: intro_sound (bool), speed (float), voice (str),
+    engine (str), color (str), effects_preset (str | None).
+
+    ``color`` is always populated -- explicit setting first, otherwise a
+    stable auto-derived color from the queue id (see
+    ``default_color_for_queue``). ``effects_preset`` is None when not set
+    so callers can distinguish "use global default" from "explicitly set
+    to off".
 
     Settings cascade (highest to lowest priority):
     1. Session-specific settings (from database)
@@ -516,12 +562,17 @@ def get_settings(session_id: str | None = None) -> dict:
         "speed": 1.0,
         "voice": preferred_voice,
         "engine": preferred_engine,
+        "color": default_color_for_queue(session_id),
+        "effects_preset": None,
     }
+
+    explicit_color: str | None = None
 
     with get_connection() as conn:
         # Get global settings (overlay on preferences)
         cursor = conn.execute(
-            "SELECT intro_sound, speed, voice, engine FROM settings WHERE session_id = '__global__'"
+            "SELECT intro_sound, speed, voice, engine, color, effects_preset"
+            " FROM settings WHERE session_id = '__global__'"
         )
         row = cursor.fetchone()
         if row:
@@ -533,11 +584,15 @@ def get_settings(session_id: str | None = None) -> dict:
                 settings["voice"] = row["voice"]
             if row["engine"] is not None:
                 settings["engine"] = row["engine"]
+            # color / effects_preset on __global__ are odd but harmless:
+            # they'd only apply if no per-queue value were set AND the
+            # caller asked for __global__.
 
         # Override with session-specific settings if they exist
         if session_id and session_id != "__global__":
             cursor = conn.execute(
-                "SELECT intro_sound, speed, voice, engine FROM settings WHERE session_id = ?",
+                "SELECT intro_sound, speed, voice, engine, color, effects_preset"
+                " FROM settings WHERE session_id = ?",
                 (session_id,)
             )
             row = cursor.fetchone()
@@ -550,7 +605,13 @@ def get_settings(session_id: str | None = None) -> dict:
                     settings["voice"] = row["voice"]
                 if row["engine"] is not None:
                     settings["engine"] = row["engine"]
+                if row["color"] is not None and str(row["color"]).strip():
+                    explicit_color = str(row["color"]).strip()
+                if row["effects_preset"] is not None and str(row["effects_preset"]).strip():
+                    settings["effects_preset"] = str(row["effects_preset"]).strip()
 
+        if explicit_color:
+            settings["color"] = explicit_color
         return settings
 
 
@@ -560,9 +621,23 @@ def set_settings(
     speed: float | None = None,
     voice: str | None = None,
     engine: str | None = None,
+    color: str | None = None,
+    effects_preset: str | None = None,
 ) -> None:
-    """Set settings for a session (or global if session_id is None)."""
+    """Set settings for a session (or global if session_id is None).
+
+    Only fields with a non-None value are written; existing values are
+    left untouched. To clear a per-queue ``color`` or ``effects_preset``
+    (so it falls back to the auto-derived color / global preset), pass
+    the empty string ``""`` -- this is normalized to NULL.
+    """
     target = session_id or "__global__"
+    # Normalize empty strings to None so the "clear override" UX has a
+    # single representation in the DB (NULL = "fall back").
+    if isinstance(color, str) and not color.strip():
+        color = ""  # sentinel for explicit clear -- handled below as NULL.
+    if isinstance(effects_preset, str) and not effects_preset.strip():
+        effects_preset = ""
 
     with get_connection() as conn:
         # Check if row exists
@@ -587,6 +662,13 @@ def set_settings(
             if engine is not None:
                 updates.append("engine = ?")
                 values.append(engine)
+            if color is not None:
+                # Empty string -> NULL (clear the override).
+                updates.append("color = ?")
+                values.append(color if color else None)
+            if effects_preset is not None:
+                updates.append("effects_preset = ?")
+                values.append(effects_preset if effects_preset else None)
 
             if updates:
                 values.append(target)
@@ -598,8 +680,8 @@ def set_settings(
             # Insert new
             conn.execute(
                 """
-                INSERT INTO settings (session_id, intro_sound, speed, voice, engine)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO settings (session_id, intro_sound, speed, voice, engine, color, effects_preset)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target,
@@ -607,6 +689,8 @@ def set_settings(
                     speed if speed is not None else 1.0,
                     voice,
                     engine,
+                    color if color else None,
+                    effects_preset if effects_preset else None,
                 )
             )
 

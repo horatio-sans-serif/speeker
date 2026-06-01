@@ -1,5 +1,6 @@
 """Configuration management for Speeker."""
 
+import copy
 import json
 
 from .paths import config_dir, config_file, ensure_dir
@@ -37,12 +38,19 @@ DEFAULT_CONFIG = {
         "acronyms_file": None,       # path to a file of extra spell-out acronyms
     },
     "effects": {
-        # Active audio-effects preset applied to TTS speech (not tones).
-        # See effects.PRESETS for valid names. "off" disables the chain
-        # entirely (no pedalboard import / instantiation cost). Read on
-        # every utterance, so changes take effect on the next message
-        # without a daemon restart.
+        # Active audio-effects preset applied to TTS speech. Per-queue
+        # settings can override this on a per-utterance basis.
+        # "off" disables the chain entirely (no pedalboard import /
+        # instantiation cost). Read on every utterance, so changes take
+        # effect on the next message without a daemon restart.
         "preset": "off",
+        # User-defined presets created via the Effects Preset Editor.
+        # Each value is a list of effects:
+        #   {"name": "Reverb", "params": {"room_size": 0.4, ...}}
+        # Merged with the built-in PRESETS at lookup time; user names
+        # shadow built-in names of the same key. Built-ins cannot be
+        # deleted via the API.
+        "custom_presets": {},
     },
     "tones": {
         # Intro/outro chord notation: a sequence of note names, each
@@ -53,6 +61,14 @@ DEFAULT_CONFIG = {
         "outro": ["C5", "G4", "E4"],     # falling major triad
         # Per-note duration in seconds when synthesizing intro/outro.
         "duration_seconds": 0.12,
+        # When True, the configured effects preset also processes
+        # synthesized tones (intros, outros, $Note prefixes,
+        # interpretation cues). When False, tones bypass the chain and
+        # only TTS speech is processed -- preserving the original "audio
+        # language stays clean" behavior. Default ON: most presets sound
+        # cohesive applied to everything; set to False if you want
+        # boomy reverb on speech but dry pings on cues.
+        "apply_effects": True,
     },
     "tone_rules": [
         # Per-queue / per-interpretation tune overrides. Each rule is:
@@ -126,7 +142,14 @@ DEFAULT_CONFIG = {
 
 
 def get_config() -> dict:
-    """Load configuration, creating default if needed."""
+    """Load configuration, creating default if needed.
+
+    Returns a DEEP copy of DEFAULT_CONFIG so callers can mutate nested
+    dicts (e.g. ``cfg.setdefault("effects", {})["custom_presets"]["foo"] = ...``)
+    without leaking state back into the module's defaults. The previous
+    shallow-copy version caused custom preset state to bleed between
+    tests and could persist user edits into the in-process defaults.
+    """
     ensure_dir(config_dir())
     cfg_file = config_file()
 
@@ -134,19 +157,20 @@ def get_config() -> dict:
         try:
             with open(cfg_file) as f:
                 config = json.load(f)
-            # Merge with defaults for any missing keys
-            merged = DEFAULT_CONFIG.copy()
+            # Merge with defaults for any missing keys. Start from a
+            # deep copy so nested dicts aren't shared with DEFAULT_CONFIG.
+            merged = copy.deepcopy(DEFAULT_CONFIG)
             for key, value in config.items():
-                if isinstance(value, dict) and key in merged:
+                if isinstance(value, dict) and key in merged and isinstance(merged[key], dict):
                     merged[key] = {**merged[key], **value}
                 else:
                     merged[key] = value
             return merged
         except (json.JSONDecodeError, IOError):
-            return DEFAULT_CONFIG.copy()
+            return copy.deepcopy(DEFAULT_CONFIG)
     else:
         save_config(DEFAULT_CONFIG)
-        return DEFAULT_CONFIG.copy()
+        return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def save_config(config: dict) -> None:

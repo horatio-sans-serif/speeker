@@ -569,6 +569,44 @@ class TestSettings:
         assert global_settings["speed"] == 1.0
         assert session_settings["speed"] == 2.0
 
+    def test_color_auto_derived_when_unset(self, temp_db):
+        """Without an explicit color, get_settings returns a stable
+        auto-derived color from the queue id hash. Same queue id always
+        yields the same color across calls."""
+        s1 = get_settings("compass-docs")
+        s2 = get_settings("compass-docs")
+        s3 = get_settings("other-queue")
+        assert s1["color"].startswith("#")
+        assert s1["color"] == s2["color"]
+        assert s1["color"] != s3["color"]  # different queue -> different color
+
+    def test_color_explicit_overrides_auto(self, temp_db):
+        """Setting an explicit color overrides the auto-derived value."""
+        set_settings(session_id="myq", color="#abcdef")
+        assert get_settings("myq")["color"] == "#abcdef"
+
+    def test_color_cleared_falls_back_to_auto(self, temp_db):
+        """Empty string clears the override; auto-derived resumes."""
+        set_settings(session_id="myq", color="#abcdef")
+        auto = get_settings("myq2")["color"]  # different queue, sanity baseline
+        _ = auto
+        set_settings(session_id="myq", color="")
+        s = get_settings("myq")
+        # Falls back to the auto-derived value for "myq" specifically.
+        assert s["color"] != "#abcdef"
+        assert s["color"].startswith("#")
+
+    def test_effects_preset_default_none(self, temp_db):
+        """When no per-queue effects preset is set, the field is None
+        so callers can tell it apart from an explicit 'off'."""
+        assert get_settings("myq")["effects_preset"] is None
+
+    def test_effects_preset_set_and_clear(self, temp_db):
+        set_settings(session_id="myq", effects_preset="natural")
+        assert get_settings("myq")["effects_preset"] == "natural"
+        set_settings(session_id="myq", effects_preset="")
+        assert get_settings("myq")["effects_preset"] is None
+
     def test_set_settings_voice(self, temp_db):
         """Test setting voice."""
         set_settings(voice="alba")

@@ -766,6 +766,181 @@ class TestEffectsRoutes:
         assert response.status_code == 400
 
 
+class TestEffectsPresetCRUD:
+    """CRUD over custom presets: create / update / rename / delete /
+    catalog. Built-in presets are protected: they can be GET-ed but not
+    deleted or overwritten."""
+
+    def test_plugin_catalog_returns_known_plugins(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.get("/api/effects/plugins")
+        assert response.status_code == 200
+        data = response.json()
+        # Spot-check the curated plugins from effects.PLUGIN_CATALOG.
+        assert "Reverb" in data["plugins"]
+        assert "Compressor" in data["plugins"]
+        # Each plugin entry has parameter descriptors.
+        reverb_params = {p["name"] for p in data["plugins"]["Reverb"]}
+        assert "room_size" in reverb_params
+        assert "wet_level" in reverb_params
+
+    def test_get_builtin_preset(self, tmp_path, client):
+        """GET on a built-in returns its chain plus builtin=true."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.get("/api/effects/presets/natural")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["builtin"] is True
+        # 'natural' is the studio chain + reverb.
+        names = [e["name"] for e in data["effects"]]
+        assert "Reverb" in names
+
+    def test_get_unknown_preset_404(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.get("/api/effects/presets/nope")
+        assert response.status_code == 404
+
+    def test_create_custom_preset(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            body = {
+                "name": "warm",
+                "effects": [
+                    {"name": "Compressor", "params": {"threshold_db": -22, "ratio": 3}},
+                    {"name": "Reverb", "params": {"wet_level": 0.18}},
+                ],
+            }
+            response = client.post("/api/effects/presets", json=body)
+            assert response.status_code == 200, response.text
+            assert response.json()["name"] == "warm"
+            # Round-trip via GET.
+            response = client.get("/api/effects/presets/warm")
+            assert response.status_code == 200
+            assert response.json()["builtin"] is False
+            # And it appears in the merged listing.
+            response = client.get("/api/effects")
+            names = [p["name"] for p in response.json()["presets"]]
+            assert "warm" in names
+
+    def test_create_rejects_builtin_name(self, tmp_path, client):
+        """A custom preset can't take a built-in's name (else delete on
+        the custom would un-cover the built-in, surprising the user)."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.post("/api/effects/presets", json={
+                "name": "natural",
+                "effects": [{"name": "Reverb", "params": {}}],
+            })
+        assert response.status_code == 400
+
+    def test_create_rejects_unknown_plugin(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.post("/api/effects/presets", json={
+                "name": "junk",
+                "effects": [{"name": "NotAPlugin", "params": {}}],
+            })
+        assert response.status_code == 400
+
+    def test_create_rejects_unknown_param(self, tmp_path, client):
+        """Typo-protection: a param name not in the plugin's catalog
+        returns 400 with the offending key."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.post("/api/effects/presets", json={
+                "name": "junk",
+                "effects": [{"name": "Reverb", "params": {"room_sizes": 0.4}}],
+            })
+        assert response.status_code == 400
+        assert "room_sizes" in response.text
+
+    def test_create_duplicate_returns_409(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            body = {"name": "warm", "effects": [{"name": "Reverb", "params": {}}]}
+            assert client.post("/api/effects/presets", json=body).status_code == 200
+            response = client.post("/api/effects/presets", json=body)
+        assert response.status_code == 409
+
+    def test_update_custom_preset(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client.post("/api/effects/presets", json={
+                "name": "warm",
+                "effects": [{"name": "Reverb", "params": {"wet_level": 0.1}}],
+            })
+            response = client.put("/api/effects/presets/warm", json={
+                "effects": [{"name": "Reverb", "params": {"wet_level": 0.4}}],
+            })
+        assert response.status_code == 200
+        # Updated value sticks.
+        assert response.json()["effects"][0]["params"]["wet_level"] == 0.4
+
+    def test_update_rename(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client.post("/api/effects/presets", json={
+                "name": "warm", "effects": [{"name": "Reverb", "params": {}}],
+            })
+            response = client.put("/api/effects/presets/warm", json={
+                "effects": [{"name": "Reverb", "params": {}}],
+                "rename": "warmth",
+            })
+        assert response.status_code == 200
+        assert response.json()["name"] == "warmth"
+        assert response.json()["renamed_from"] == "warm"
+
+    def test_delete_custom_preset(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client.post("/api/effects/presets", json={
+                "name": "warm", "effects": [{"name": "Reverb", "params": {}}],
+            })
+            response = client.delete("/api/effects/presets/warm")
+        assert response.status_code == 200
+        assert response.json()["deleted"] == "warm"
+
+    def test_delete_builtin_rejected(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            response = client.delete("/api/effects/presets/natural")
+        assert response.status_code == 400
+
+    def test_delete_active_default_resets_to_off(self, tmp_path, client):
+        """When the deleted custom preset was the saved global default,
+        the daemon would otherwise resolve a missing name -> off on
+        every utterance. Reset proactively."""
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client.post("/api/effects/presets", json={
+                "name": "warm", "effects": [{"name": "Reverb", "params": {}}],
+            })
+            client.put("/api/effects", json={"preset": "warm"})
+            response = client.delete("/api/effects/presets/warm")
+        assert response.status_code == 200
+        assert response.json()["default_reset_to_off"] is True
+        # Verify the saved global is now 'off'.
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            current = client.get("/api/effects").json()["current"]
+        assert current == "off"
+
+
+class TestPerQueueSettings:
+    """Per-queue color and effects_preset cascade through /api/settings."""
+
+    def test_put_settings_color_validation(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            r = client.put("/api/settings", json={"session": "q1", "color": "not-a-color"})
+        assert r.status_code == 400
+
+    def test_put_settings_accepts_hex_color(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            r = client.put("/api/settings", json={"session": "q1", "color": "#aabbcc"})
+            assert r.status_code == 200, r.text
+            assert r.json()["color"] == "#aabbcc"
+
+    def test_put_settings_rejects_unknown_preset(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            r = client.put("/api/settings", json={"session": "q1", "effects_preset": "definitely-not-real"})
+        assert r.status_code == 400
+
+    def test_put_settings_accepts_builtin_preset(self, tmp_path, client):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            r = client.put("/api/settings", json={"session": "q1", "effects_preset": "natural"})
+            assert r.status_code == 200, r.text
+            assert r.json()["effects_preset"] == "natural"
+
+
 class TestToneTunesAndPlay:
     """The /api/tones/tunes catalog + /api/tones/play preview endpoint."""
 

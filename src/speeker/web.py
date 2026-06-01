@@ -9,6 +9,7 @@ from pathlib import Path
 import hashlib
 import json
 import re
+from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -227,10 +228,14 @@ HTML_TEMPLATE = """
             0%, 100% { box-shadow: 0 0 14px var(--accent-soft); }
             50%      { box-shadow: 0 0 24px var(--accent-line); }
         }
-        .card-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
+        /* --queue-color is set inline per card (and per table row) from the
+           per-queue accent in /api/items. The 4px left stripe is the
+           card's primary cue for project identity; falling back to the
+           border color when no per-queue color is set keeps existing
+           visuals on undecorated rows. */
+        .card {
+            position: relative;
+            border-left: 4px solid var(--queue-color, var(--border));
         }
         .card-text {
             color: var(--text-1);
@@ -240,35 +245,79 @@ HTML_TEMPLATE = """
             white-space: pre-wrap;
             word-break: break-word;
             line-height: 1.55;
-            flex: 1;
         }
+        /* Single explicit footer: status pill, queue chip, time, then a
+           right-justified action cluster (copy / download / play). */
         .card-footer {
             display: flex;
-            justify-content: space-between;
             align-items: center;
+            gap: 10px;
             padding-top: 10px;
+            margin-top: 8px;
             border-top: 1px solid var(--border);
+            flex-wrap: wrap;
         }
-        .card-meta {
+        .card-footer-actions {
             display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            flex: 1;
-            min-width: 0;
+            gap: 6px;
+            align-items: center;
+            margin-left: auto;
         }
-        .metadata {
-            font-size: 0.78em;
-            line-height: 1.3;
-            color: var(--text-3);
+        /* Queue chip: monospace code-like pill with the queue's accent
+           color as a left border. The full queue name lives in the title=
+           attribute so hover reveals it. */
+        .queue-chip {
+            display: inline-block;
             font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
-            max-height: 50px;
-            overflow-y: auto;
-            flex: 1;
-            min-width: 0;
+            font-size: 0.78em;
+            background: var(--surface-2);
+            color: var(--text-2);
+            border: 1px solid var(--border);
+            border-left: 4px solid var(--queue-color, var(--accent-line));
+            padding: 2px 8px;
+            border-radius: 4px;
+            cursor: help;
+            white-space: nowrap;
         }
-        .metadata .kv { white-space: nowrap; }
-        .metadata .key { color: var(--text-mute); }
-        .metadata .value { color: var(--text-3); margin-right: 8px; }
+        /* Copy button: ghost circle that pulses to "copied" on success.
+           Uses the same 34px footprint as the play / download buttons so
+           the action row aligns visually. */
+        .copy-btn {
+            background: transparent;
+            color: var(--text-3);
+            border: 1px solid var(--border-strong);
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            transition: background 0.12s, color 0.12s, border-color 0.12s;
+        }
+        .copy-btn:hover {
+            background: var(--surface-2);
+            color: var(--text-1);
+            border-color: var(--accent-line);
+        }
+        .copy-btn.copied {
+            background: var(--accent-soft);
+            color: var(--success);
+            border-color: var(--success);
+        }
+        .copy-btn.small {
+            width: 28px;
+            height: 28px;
+        }
+        .copy-btn svg {
+            width: 15px;
+            height: 15px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+        }
+        .copy-btn.small svg { width: 13px; height: 13px; }
         .play-btn {
             background: var(--accent);
             color: var(--accent-fg);
@@ -357,6 +406,78 @@ HTML_TEMPLATE = """
             letter-spacing: 0.02em;
             cursor: help;
             user-select: none;
+        }
+        /* Built-in marker on the Effects Preset Editor heading; reuses
+           the muted accent so it reads as informational, not blocking. */
+        .badge-builtin {
+            display: inline-block;
+            margin-left: 8px;
+            padding: 1px 7px;
+            border-radius: 8px;
+            background: var(--surface-2);
+            color: var(--text-3);
+            font-size: 0.7em;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+        .preset-editor {
+            margin-top: 20px;
+            padding: 14px;
+            background: var(--surface-1);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+        }
+        .preset-editor-header { margin-bottom: 10px; }
+        .preset-editor-chain { display: flex; flex-direction: column; gap: 8px; }
+        .effect-card {
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 10px 12px;
+        }
+        .effect-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+        .effect-card-header .effect-name {
+            font-weight: 600;
+            color: var(--text-1);
+            font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+            font-size: 0.92em;
+        }
+        .effect-card-actions { display: flex; gap: 4px; }
+        .effect-params {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 6px 14px;
+        }
+        .effect-param {
+            display: grid;
+            grid-template-columns: 90px 1fr 70px;
+            gap: 6px;
+            align-items: center;
+            font-size: 0.85em;
+        }
+        .effect-param label {
+            color: var(--text-3);
+            font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+            font-size: 0.85em;
+            text-align: right;
+            cursor: help;
+        }
+        .effect-param input[type="range"] { width: 100%; }
+        .effect-param .param-num {
+            width: 100%;
+            font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+            font-size: 0.82em;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: var(--surface-3);
+            border: 1px solid var(--border);
+            color: var(--text-1);
         }
         .score {
             color: var(--accent);
@@ -781,6 +902,11 @@ HTML_TEMPLATE = """
             max-height: 320px;
             overflow-y: auto;
         }
+        /* Queue picker row: per-queue color is used as ACCENT, not full
+           background. A 3px left stripe colors the row at rest; selected
+           rows get an 8% tint of the same color plus a brighter stripe.
+           --queue-color is set inline per row from the queue's settings.color
+           (auto-derived from queue id when no explicit color is set). */
         .project-row {
             display: flex;
             align-items: center;
@@ -790,11 +916,17 @@ HTML_TEMPLATE = """
             color: var(--text-2);
             font-size: 13.5px;
             user-select: none;
+            border-left: 3px solid var(--queue-color, transparent);
         }
         .project-row:hover { background: var(--surface-2); color: var(--text-1); }
         .project-row.selected {
+            /* Tinted fill from the queue color using color-mix where
+               supported (modern browsers); falls back to accent-soft so
+               older browsers still show a clear selected state. */
             background: var(--accent-soft);
+            background: color-mix(in srgb, var(--queue-color, var(--accent-line)) 14%, transparent);
             color: var(--text-1);
+            border-left-width: 4px;
         }
         .project-row .checkbox {
             width: 14px;
@@ -809,8 +941,12 @@ HTML_TEMPLATE = """
             background: var(--surface-3);
         }
         .project-row.selected .checkbox {
+            /* Use the queue color for the check fill so the affordance
+               echoes the row accent. Older browsers without color-mix
+               fall back to the accent variable. */
             background: var(--accent);
-            border-color: var(--accent);
+            background: var(--queue-color, var(--accent));
+            border-color: var(--queue-color, var(--accent));
             color: var(--accent-fg);
         }
         .project-row .checkbox::after {
@@ -960,6 +1096,14 @@ HTML_TEMPLATE = """
             font-size: 0.92em;
             vertical-align: top;
             color: var(--text-1);
+        }
+        /* Per-row queue-color accent on the leading cell. Interpretation
+           classes (.row-success / .row-error / .row-other) re-color this
+           border to the outcome cue's semantic color, which takes
+           visual priority -- the per-queue tint is a passive identity
+           cue, the outcome cue is an active signal. */
+        .history-table tr td:first-child {
+            border-left: 4px solid var(--queue-color, transparent);
         }
         .history-table tr:last-child td { border-bottom: none; }
         .history-table tr.row-speaking td {
@@ -1313,16 +1457,20 @@ function HistoryView() {
     }, [fetchItems]);
 
     // Distinct queue names ordered by frequency (most-active project first
-    // so the chips reflect what's actively making noise).
+    // so the chips reflect what's actively making noise). Each option
+    // carries the queue's per-queue color so ProjectPicker can use it
+    // as the row accent (left stripe + selected pill border).
     const queueOptions = useMemo(() => {
         const counts = new Map();
+        const colors = new Map();
         for (const it of items) {
             const q = it.queue || 'default';
             counts.set(q, (counts.get(q) || 0) + 1);
+            if (it.queue_color && !colors.has(q)) colors.set(q, it.queue_color);
         }
         return [...counts.entries()]
             .sort((a, b) => b[1] - a[1])
-            .map(([name, count]) => ({ name, count }));
+            .map(([name, count]) => ({ name, count, color: colors.get(name) || null }));
     }, [items]);
 
     const toggleQueue = (name) => {
@@ -1511,12 +1659,20 @@ function ProjectPicker({
                     <div style={{ color: 'var(--text-mute)', fontSize: '0.85em', padding: '6px 0' }}>
                         {emptyLabel}
                     </div>
-                ) : filtered.map(({ name, count }) => {
+                ) : filtered.map(({ name, count, color }) => {
                     const sel = selected.has(name);
+                    // Color is an ACCENT, not a fill: a 4px left stripe
+                    // colors the row, plus a soft 8% tint on selected rows
+                    // so the active state is unmistakable but readable.
+                    const style = color ? {
+                        '--queue-color': color,
+                        borderLeftColor: color,
+                    } : {};
                     return (
                         <div
                             key={name}
                             className={'project-row' + (sel ? ' selected' : '')}
+                            style={style}
                             onClick={() => onToggle(name)}
                             role="checkbox"
                             aria-checked={sel}
@@ -1659,16 +1815,79 @@ function InlineCalendar({ fromDate, toDate, onChange }) {
 // The "When" column is narrow + no-wrap because the date string is fixed
 // width ("May 28 13:24") and wrapping it across two lines wastes vertical
 // space for no information.
+// Truncate a queue id for compact display. Keeps the leading 8 chars and
+// adds an ellipsis. The full id is preserved in the parent's title=
+// attribute so hovering reveals it.
+const QUEUE_TRUNC_LEN = 8;
+function truncateQueue(name) {
+    if (!name) return '';
+    return name.length > QUEUE_TRUNC_LEN ? name.slice(0, QUEUE_TRUNC_LEN) + '…' : name;
+}
+
+// Copy-to-clipboard button. Falls back to a textarea + execCommand when
+// the modern clipboard API isn't available (non-https contexts). Shows
+// a brief "Copied" affordance so the user knows it worked without a
+// noisy toast.
+function CopyBtn({ text, small }) {
+    const [copied, setCopied] = useState(false);
+    const doCopy = async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const payload = (text || '').trim();
+        if (!payload) return;
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(payload);
+            } else {
+                const ta = document.createElement('textarea');
+                ta.value = payload;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'absolute';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                document.execCommand('copy');
+                document.body.removeChild(ta);
+            }
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1200);
+        } catch (_err) {
+            // Silently ignore: the worst case is a no-op button, which
+            // is better than an exception during a quick paste workflow.
+        }
+    };
+    return (
+        <button
+            type="button"
+            className={'copy-btn' + (small ? ' small' : '') + (copied ? ' copied' : '')}
+            onClick={doCopy}
+            title={copied ? 'Copied' : 'Copy text'}
+            aria-label="Copy spoken text"
+        >
+            {copied ? (
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 13l4 4L19 7" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+            ) : (
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <rect x="9" y="9" width="11" height="11" rx="1.5"/>
+                    <path d="M5 15V5a1 1 0 011-1h10" strokeLinecap="round" strokeLinejoin="round" fill="none"/>
+                </svg>
+            )}
+        </button>
+    );
+}
+
 function HistoryTable({ items, speakingId, playingId, onPlay }) {
     return (
         <table className="history-table">
             <thead>
                 <tr>
                     <th>Text</th>
-                    <th style={{ width: 160 }}>Project</th>
+                    <th style={{ width: 130 }}>Project</th>
                     <th className="col-date" style={{ width: 110 }}>When</th>
                     <th style={{ width: 80 }}>Status</th>
-                    <th style={{ width: 80 }}></th>
+                    <th style={{ width: 130 }}></th>
                 </tr>
             </thead>
             <tbody>
@@ -1688,20 +1907,32 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
                                 it.interp_class === 'interp-other' ? 'row-other' : '',
                     ].filter(Boolean).join(' ');
                     const status = isSpeaking ? 'Speaking' : (it.played ? 'Played' : 'Pending');
+                    // Row-level CSS variable carries the queue's accent color
+                    // to a ::before stripe selector defined in the stylesheet.
+                    const rowStyle = it.queue_color
+                        ? { '--queue-color': it.queue_color }
+                        : {};
                     return (
-                        <tr key={it.id} className={rowCls}>
+                        <tr key={it.id} className={rowCls} style={rowStyle}>
                             <td className="col-text" title={it.text} dangerouslySetInnerHTML={{ __html: it.text }} />
-                            <td><code>{it.queue}</code></td>
+                            <td>
+                                <code
+                                    className="queue-chip"
+                                    title={it.queue}
+                                    style={it.queue_color ? { borderLeftColor: it.queue_color } : {}}
+                                >{truncateQueue(it.queue)}</code>
+                            </td>
                             <td className="col-date">{it.time}</td>
                             <td>{status}</td>
                             <td>
-                                <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                                <div style={{ display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'flex-end' }}>
                                     {it.tts_error && (
                                         <span
                                             className="tts-error-badge"
                                             title={'TTS failed: ' + it.tts_error}
                                         >TTS failed</span>
                                     )}
+                                    <CopyBtn text={it.raw_text} small />
                                     <DownloadBtn itemId={it.id} hasAudio={it.has_audio} small />
                                     <button
                                         className="play-btn"
@@ -1723,6 +1954,12 @@ function HistoryTable({ items, speakingId, playingId, onPlay }) {
     );
 }
 
+// History card: text on top, single footer row carrying everything else
+// (status pill, queue chip, time, action buttons). Header/footer split
+// was removed -- the time and status were visually homeless at the top
+// and a single explicit footer makes the action affordances cluster
+// where the eye expects them. The queue's accent color drives a 4px
+// left stripe via the --queue-color CSS variable.
 function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
     const interpClass = item.interp_class || '';
     const cls = [
@@ -1733,24 +1970,26 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay }) {
     ].filter(Boolean).join(' ');
     const statusClass = item.played ? 'played' : 'pending';
     const statusText = isSpeaking ? 'Speaking' : (item.played ? 'Played' : 'Pending');
+    const cardStyle = item.queue_color ? { '--queue-color': item.queue_color } : {};
     return (
-        <div className={cls} data-id={item.id} data-interp={interpClass}>
-            <div className="card-header">
-                <span className={'status ' + statusClass}>{statusText}</span>
-                <span className="time">{item.time}</span>
-            </div>
+        <div className={cls} data-id={item.id} data-interp={interpClass} style={cardStyle}>
             <div className="card-text" dangerouslySetInnerHTML={{ __html: item.text }} />
             <div className="card-footer">
-                <div className="card-meta">
-                    <div className="metadata" dangerouslySetInnerHTML={{ __html: item.metadata }} />
-                </div>
-                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <span className={'status ' + statusClass}>{statusText}</span>
+                <code
+                    className="queue-chip"
+                    title={item.queue}
+                    style={item.queue_color ? { borderLeftColor: item.queue_color } : {}}
+                >{truncateQueue(item.queue)}</code>
+                <span className="time">{item.time}</span>
+                <div className="card-footer-actions">
                     {item.tts_error && (
                         <span
                             className="tts-error-badge"
                             title={'TTS failed: ' + item.tts_error}
                         >TTS failed</span>
                     )}
+                    <CopyBtn text={item.raw_text} />
                     <DownloadBtn itemId={item.id} hasAudio={item.has_audio} />
                     <button
                         className="play-btn"
@@ -2387,6 +2626,7 @@ function TonesSection() {
     const [intro, setIntro] = useState('');     // space-separated note string
     const [outro, setOutro] = useState('');
     const [duration, setDuration] = useState(0.12);
+    const [applyEffects, setApplyEffects] = useState(true);
     const [tunes, setTunes] = useState([]);     // [{name, notes, note}]
     // Tunes dropdown state: kept controlled so React owns the reset
     // (an uncontrolled select with `e.target.value=''` fights React if
@@ -2402,6 +2642,7 @@ function TonesSection() {
             setIntro((d.intro || []).join(' '));
             setOutro((d.outro || []).join(' '));
             setDuration(d.duration_seconds ?? 0.12);
+            setApplyEffects(d.apply_effects !== false);
         });
         fetch('/api/tones/tunes').then(r => r.json()).then(d => {
             setTunes(d.tunes || []);
@@ -2447,6 +2688,7 @@ function TonesSection() {
                     intro: parseNotes(intro),
                     outro: parseNotes(outro),
                     duration_seconds: duration,
+                    apply_effects: applyEffects,
                 }),
             });
             if (!resp.ok) {
@@ -2542,6 +2784,17 @@ function TonesSection() {
                             value={duration}
                             onChange={e => setDuration(parseFloat(e.target.value))}
                         />
+                    </div>
+                    <div className="field-row" style={{ alignItems: 'center' }}>
+                        <label>Apply effects to tones</label>
+                        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 400, color: 'var(--text-2)' }}>
+                            <input
+                                type="checkbox"
+                                checked={applyEffects}
+                                onChange={e => setApplyEffects(e.target.checked)}
+                            />
+                            {applyEffects ? 'On' : 'Off'}
+                        </label>
                     </div>
                     <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
                         <button className="btn" onClick={save}>Save tones</button>
@@ -2794,6 +3047,15 @@ function EffectsSection() {
     const [current, setCurrent] = useState('off');
     const [selected, setSelected] = useState('off');
     const [status, setStatus] = useState('');
+    const [plugins, setPlugins] = useState({});  // {pluginName: [{name, type, default, min, max, step}, ...]}
+    const [editorOpen, setEditorOpen] = useState(false);
+
+    const reloadPresets = useCallback(() => {
+        fetch('/api/effects').then(r => r.json()).then(d => {
+            setPresets(d.presets || []);
+            setCurrent(d.current || 'off');
+        });
+    }, []);
 
     useEffect(() => {
         fetch('/api/effects').then(r => r.json()).then(d => {
@@ -2801,6 +3063,7 @@ function EffectsSection() {
             setCurrent(d.current || 'off');
             setSelected(d.current || 'off');
         });
+        fetch('/api/effects/plugins').then(r => r.json()).then(d => setPlugins(d.plugins || {}));
     }, []);
 
     const save = async () => {
@@ -2842,20 +3105,17 @@ function EffectsSection() {
 
     const description =
         (presets.find(p => p.name === selected) || {}).description || '';
+    const selectedIsBuiltin = (presets.find(p => p.name === selected) || {}).builtin;
 
     return (
         <>
-            <div className="help">
-                Applied to TTS speech only; tones and cues stay clean.
-                Requires the <code>pedalboard</code> optional dep -- without it every
-                preset behaves like <code>off</code>.
-            </div>
             <div className="field-row">
                 <label>Preset</label>
                 <select value={selected} onChange={e => setSelected(e.target.value)}>
                     {presets.map(p => (
                         <option key={p.name} value={p.name}>
-                            {p.name}{p.effect_count > 0 ? `  (${p.effect_count} effect${p.effect_count === 1 ? '' : 's'})` : ''}
+                            {p.name}{p.builtin ? '' : ' (custom)'}
+                            {p.effect_count > 0 ? `  (${p.effect_count} effect${p.effect_count === 1 ? '' : 's'})` : ''}
                         </option>
                     ))}
                 </select>
@@ -2865,7 +3125,7 @@ function EffectsSection() {
                     {description}
                 </div>
             )}
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
                 <button className="btn-try" onClick={trySample}>Try sample</button>
                 <button
                     className="btn"
@@ -2873,6 +3133,11 @@ function EffectsSection() {
                     disabled={selected === current}
                     title={selected === current ? 'No unsaved change' : 'Persist selection'}
                 >Save</button>
+                <button
+                    className="btn subtle"
+                    onClick={() => setEditorOpen(o => !o)}
+                    title="Add / edit / delete custom presets"
+                >{editorOpen ? 'Hide editor' : 'Open editor'}</button>
                 <span className="save-success">{status}</span>
                 {selected !== current && (
                     <span className="filter-label" style={{ marginLeft: 6 }}>
@@ -2880,7 +3145,295 @@ function EffectsSection() {
                     </span>
                 )}
             </div>
+            {editorOpen && (
+                <PresetEditor
+                    presets={presets}
+                    plugins={plugins}
+                    onPresetsChanged={reloadPresets}
+                    selectedName={selected}
+                    onSelectPreset={setSelected}
+                />
+            )}
         </>
+    );
+}
+
+// ----- Effects Preset Editor.
+//
+// CRUD over custom presets. Built-in presets are read-only -- selecting
+// one shows its chain but disables save/rename/delete. Editing a built-in
+// is done via "Clone as custom..." which seeds a new editable preset.
+//
+// Storage shape (per preset, matches the API):
+//   {name: string, effects: [{name: pluginName, params: {paramName: number}}]}
+function PresetEditor({ presets, plugins, onPresetsChanged, selectedName, onSelectPreset }) {
+    const [editName, setEditName] = useState(selectedName);
+    const [chain, setChain] = useState([]);  // [{name, params}]
+    const [origName, setOrigName] = useState(selectedName);
+    const [origChain, setOrigChain] = useState([]);
+    const [isBuiltin, setIsBuiltin] = useState(true);
+    const [renameTo, setRenameTo] = useState('');
+    const [addType, setAddType] = useState('');
+    const [status, setStatus] = useState('');
+
+    // Load the selected preset's chain whenever the user picks a different
+    // one from the parent's dropdown. We track its origin chain so the
+    // Save button can stay disabled when nothing has changed.
+    useEffect(() => {
+        if (!selectedName) return;
+        fetch('/api/effects/presets/' + encodeURIComponent(selectedName))
+            .then(r => r.json())
+            .then(d => {
+                setEditName(d.name);
+                setOrigName(d.name);
+                setChain(d.effects || []);
+                setOrigChain(JSON.parse(JSON.stringify(d.effects || [])));
+                setIsBuiltin(!!d.builtin);
+                setRenameTo('');
+                setStatus('');
+            });
+    }, [selectedName]);
+
+    const isDirty = JSON.stringify(chain) !== JSON.stringify(origChain)
+        || (renameTo.trim() && renameTo.trim() !== origName);
+
+    const setEffectParam = (idx, key, value) => {
+        setChain(c => c.map((eff, i) => i === idx
+            ? { ...eff, params: { ...eff.params, [key]: parseFloat(value) } }
+            : eff
+        ));
+    };
+
+    const moveEffect = (idx, delta) => {
+        const j = idx + delta;
+        if (j < 0 || j >= chain.length) return;
+        setChain(c => {
+            const next = c.slice();
+            [next[idx], next[j]] = [next[j], next[idx]];
+            return next;
+        });
+    };
+
+    const removeEffect = (idx) => setChain(c => c.filter((_, i) => i !== idx));
+
+    const addEffect = () => {
+        if (!addType || !plugins[addType]) return;
+        // Seed with the catalog's defaults so the chain audibly does
+        // something the moment it's added.
+        const params = {};
+        for (const p of plugins[addType]) {
+            params[p.name] = p.default;
+        }
+        setChain(c => [...c, { name: addType, params }]);
+        setAddType('');
+    };
+
+    const saveChain = async () => {
+        setStatus('Saving...');
+        try {
+            const url = '/api/effects/presets/' + encodeURIComponent(origName);
+            const body = { effects: chain };
+            if (renameTo.trim() && renameTo.trim() !== origName) {
+                body.rename = renameTo.trim();
+            }
+            const resp = await fetch(url, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!resp.ok) {
+                const err = await resp.json().catch(() => ({}));
+                setStatus('Error: ' + (err.detail || resp.statusText));
+                return;
+            }
+            const data = await resp.json();
+            setOrigChain(JSON.parse(JSON.stringify(data.effects || [])));
+            setOrigName(data.name);
+            setEditName(data.name);
+            setRenameTo('');
+            setStatus(data.message || 'Saved.');
+            onPresetsChanged();
+            if (data.name !== origName) onSelectPreset(data.name);
+            setTimeout(() => setStatus(''), 2500);
+        } catch (e) {
+            setStatus('Save failed: ' + e.message);
+        }
+    };
+
+    const deletePreset = async () => {
+        if (!window.confirm('Delete preset "' + origName + '"? This cannot be undone.')) return;
+        const resp = await fetch('/api/effects/presets/' + encodeURIComponent(origName), { method: 'DELETE' });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            setStatus('Error: ' + (err.detail || resp.statusText));
+            return;
+        }
+        const data = await resp.json();
+        setStatus(data.message || 'Deleted.');
+        onPresetsChanged();
+        // Snap selection back to 'off' to avoid pointing at the deleted name.
+        onSelectPreset(data.default_reset_to_off ? 'off' : 'off');
+    };
+
+    const cloneAsCustom = async () => {
+        const base = origName;
+        let suggested = base + ' copy';
+        // Avoid collision with existing names.
+        const existing = new Set(presets.map(p => p.name));
+        let i = 1;
+        while (existing.has(suggested)) {
+            i += 1;
+            suggested = base + ' copy ' + i;
+        }
+        const name = window.prompt('Name for the new custom preset:', suggested);
+        if (!name) return;
+        const resp = await fetch('/api/effects/presets', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, effects: chain }),
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            setStatus('Error: ' + (err.detail || resp.statusText));
+            return;
+        }
+        const data = await resp.json();
+        setStatus(data.message || 'Created.');
+        onPresetsChanged();
+        onSelectPreset(data.name);
+    };
+
+    return (
+        <div className="preset-editor">
+            <div className="preset-editor-header">
+                <div>
+                    <h3 style={{ margin: '0 0 4px', fontSize: '1em' }}>
+                        Editing: <code>{origName}</code>
+                        {isBuiltin && <span className="badge-builtin" title="Built-in presets are read-only -- use Clone as custom to edit">built-in</span>}
+                    </h3>
+                    {isBuiltin
+                        ? <div className="help" style={{ margin: 0 }}>
+                            Read-only. Use <strong>Clone as custom</strong> to start a new editable preset from this chain.
+                        </div>
+                        : <div className="field-row" style={{ margin: '4px 0 0' }}>
+                            <label style={{ minWidth: 60 }}>Rename</label>
+                            <input
+                                type="text"
+                                placeholder={origName}
+                                value={renameTo}
+                                onChange={e => setRenameTo(e.target.value)}
+                            />
+                        </div>
+                    }
+                </div>
+            </div>
+            <div className="preset-editor-chain">
+                {chain.length === 0 && (
+                    <div style={{ color: 'var(--text-3)', padding: '12px 0' }}>
+                        Empty chain. Add an effect below.
+                    </div>
+                )}
+                {chain.map((eff, idx) => {
+                    const params = plugins[eff.name] || [];
+                    return (
+                        <div className="effect-card" key={idx}>
+                            <div className="effect-card-header">
+                                <span className="effect-name">{eff.name}</span>
+                                <div className="effect-card-actions">
+                                    <button
+                                        className="btn-try"
+                                        disabled={idx === 0 || isBuiltin}
+                                        onClick={() => moveEffect(idx, -1)}
+                                        title="Move up"
+                                    >▲</button>
+                                    <button
+                                        className="btn-try"
+                                        disabled={idx === chain.length - 1 || isBuiltin}
+                                        onClick={() => moveEffect(idx, 1)}
+                                        title="Move down"
+                                    >▼</button>
+                                    <button
+                                        className="btn-try"
+                                        disabled={isBuiltin}
+                                        onClick={() => removeEffect(idx)}
+                                        title="Remove"
+                                    >×</button>
+                                </div>
+                            </div>
+                            <div className="effect-params">
+                                {params.map(p => {
+                                    const value = eff.params[p.name];
+                                    const display = (value === undefined || value === null) ? p.default : value;
+                                    return (
+                                        <div className="effect-param" key={p.name}>
+                                            <label title={`min ${p.min} max ${p.max}`}>{p.name}</label>
+                                            <input
+                                                type="range"
+                                                min={p.min}
+                                                max={p.max}
+                                                step={p.step}
+                                                value={display}
+                                                disabled={isBuiltin}
+                                                onChange={e => setEffectParam(idx, p.name, e.target.value)}
+                                            />
+                                            <input
+                                                type="number"
+                                                min={p.min}
+                                                max={p.max}
+                                                step={p.step}
+                                                value={display}
+                                                disabled={isBuiltin}
+                                                onChange={e => setEffectParam(idx, p.name, e.target.value)}
+                                                className="param-num"
+                                            />
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    );
+                })}
+            </div>
+            <div className="field-row" style={{ marginTop: 12 }}>
+                <label style={{ minWidth: 60 }}>Add effect</label>
+                <select
+                    value={addType}
+                    onChange={e => setAddType(e.target.value)}
+                    disabled={isBuiltin}
+                >
+                    <option value="">(choose plugin...)</option>
+                    {Object.keys(plugins).sort().map(name => (
+                        <option key={name} value={name}>{name}</option>
+                    ))}
+                </select>
+                <button
+                    className="btn"
+                    onClick={addEffect}
+                    disabled={!addType || isBuiltin}
+                >Add</button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+                <button
+                    className="btn"
+                    onClick={saveChain}
+                    disabled={!isDirty || isBuiltin}
+                    title={isBuiltin ? 'Built-in presets are read-only' : (isDirty ? 'Save changes' : 'No unsaved change')}
+                >Save</button>
+                <button
+                    className="btn subtle"
+                    onClick={cloneAsCustom}
+                    title="Create a new custom preset starting from this chain"
+                >Clone as custom...</button>
+                <button
+                    className="btn subtle"
+                    onClick={deletePreset}
+                    disabled={isBuiltin}
+                    title={isBuiltin ? 'Built-in presets cannot be deleted' : 'Delete this custom preset'}
+                    style={{ color: 'var(--warn)' }}
+                >Delete</button>
+                <span className="save-success">{status}</span>
+            </div>
+        </div>
     );
 }
 
@@ -3073,6 +3626,7 @@ function PerQueueSection({ engines }) {
     const [editing, setEditing] = useState(null);
     const [pending, setPending] = useState({});
     const [saveStatus, setSaveStatus] = useState({});
+    const [presets, setPresets] = useState([]);  // [{name, description, builtin}]
     // Set of queue names included in the filter. Empty Set = show all.
     // Shape matches HistoryView's selectedQueues so ProjectPicker can be
     // reused as-is.
@@ -3094,21 +3648,46 @@ function PerQueueSection({ engines }) {
         fetch('/api/queues').then(r => r.json()).then(d => setQueues(d.queues));
     }, []);
     useEffect(() => { reload(); }, [reload]);
+    // Load preset list once for the per-queue effects dropdown.
+    useEffect(() => {
+        fetch('/api/effects').then(r => r.json()).then(d => setPresets(d.presets || []));
+    }, []);
 
     const startEdit = (q) => {
         setEditing(q.queue);
         setPending(prev => ({ ...prev, [q.queue]: { ...q.settings } }));
     };
+    const cancelEdit = () => setEditing(null);
     const setField = (queue, key, value) => {
         setPending(prev => ({ ...prev, [queue]: { ...prev[queue], [key]: value } }));
     };
     const save = async (queue) => {
         const patch = pending[queue];
         setSaveStatus(prev => ({ ...prev, [queue]: 'Saving...' }));
+        const body = {
+            session: queue,
+            engine: patch.engine,
+            voice: patch.voice,
+        };
+        // Color: send only when changed from the current setting; empty
+        // string is the explicit "clear override" sentinel honored by
+        // the backend (so user-removed colors fall back to auto-derived).
+        const origColor = (queues.find(q => q.queue === queue) || {}).settings?.color || '';
+        if ((patch.color || '') !== origColor) {
+            body.color = patch.color || '';
+        }
+        // Effects preset: same pattern. ``"inherit"`` is the UI-only
+        // sentinel for "fall back to global"; map it to empty string
+        // before sending so the backend stores NULL.
+        const origPreset = (queues.find(q => q.queue === queue) || {}).settings?.effects_preset || '';
+        const newPreset = patch.effects_preset === 'inherit' ? '' : (patch.effects_preset || '');
+        if (newPreset !== origPreset) {
+            body.effects_preset = newPreset;
+        }
         await fetch('/api/settings', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ session: queue, engine: patch.engine, voice: patch.voice }),
+            body: JSON.stringify(body),
         });
         setSaveStatus(prev => ({ ...prev, [queue]: 'Saved' }));
         setEditing(null);
@@ -3146,11 +3725,17 @@ function PerQueueSection({ engines }) {
         setTimeout(() => setTryStatus(prev => ({ ...prev, [q.queue]: '' })), 2000);
     };
 
-    // ProjectPicker uses the same {name, count} shape as the History
-    // sidebar. Count comes from the queue's total_messages so the user
-    // can quickly tell which projects are most active.
+    // ProjectPicker uses the same {name, count, color} shape as the
+    // History sidebar. Count comes from the queue's total_messages so
+    // the user can quickly tell which projects are most active. Color
+    // comes from the per-queue setting -- explicit value or the
+    // auto-derived default (settings.color is always populated).
     const projectOptions = useMemo(
-        () => queues.map(q => ({ name: q.queue, count: q.total_messages })),
+        () => queues.map(q => ({
+            name: q.queue,
+            count: q.total_messages,
+            color: q.settings && q.settings.color,
+        })),
         [queues],
     );
     const toggleQueue = (name) => {
@@ -3262,12 +3847,13 @@ function PerQueueSection({ engines }) {
                             ? <PerQueueCards
                                 queues={filteredSorted}
                                 engines={engines}
+                                presets={presets}
                                 editing={editing}
                                 pending={pending}
                                 saveStatus={saveStatus}
                                 setField={setField}
                                 startEdit={startEdit}
-                                cancelEdit={() => setEditing(null)}
+                                cancelEdit={cancelEdit}
                                 save={save}
                                 tryRow={tryRow}
                                 tryStatus={tryStatus}
@@ -3275,12 +3861,13 @@ function PerQueueSection({ engines }) {
                             : <PerQueueTable
                                 queues={filteredSorted}
                                 engines={engines}
+                                presets={presets}
                                 editing={editing}
                                 pending={pending}
                                 saveStatus={saveStatus}
                                 setField={setField}
                                 startEdit={startEdit}
-                                cancelEdit={() => setEditing(null)}
+                                cancelEdit={cancelEdit}
                                 save={save}
                                 tryRow={tryRow}
                                 tryStatus={tryStatus}
@@ -3294,17 +3881,23 @@ function PerQueueSection({ engines }) {
 
 // Card grid for per-queue overrides. Each card shows the queue name,
 // current overrides, message count, and an edit/save row.
-function PerQueueCards({ queues, engines, editing, pending, saveStatus, setField, startEdit, cancelEdit, save, tryRow, tryStatus }) {
+function PerQueueCards({ queues, engines, presets, editing, pending, saveStatus, setField, startEdit, cancelEdit, save, tryRow, tryStatus }) {
     return (
-        <div className="cards-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))' }}>
+        <div className="cards-grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))' }}>
             {queues.map(q => {
                 const isEd = editing === q.queue;
                 const ed = pending[q.queue] || q.settings;
                 const engineVoices = engines.find(e => e.name === (ed.engine || q.settings.engine))?.voices || [];
+                const color = ed.color || q.settings.color || '#7a8694';
+                const cardStyle = { '--queue-color': color };
+                // The "inherit" value is a UI sentinel meaning "fall back
+                // to the global effects preset"; the backend stores it
+                // as NULL.
+                const presetValue = ed.effects_preset || 'inherit';
                 return (
-                    <div className="card" key={q.queue}>
-                        <div className="card-header">
-                            <span className="card-text" style={{ flex: 'none', fontWeight: 600, color: 'var(--text-1)' }}>
+                    <div className="card" key={q.queue} style={cardStyle}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                            <span style={{ fontWeight: 600, color: 'var(--text-1)', wordBreak: 'break-all' }} title={q.queue}>
                                 {q.queue}
                             </span>
                             <span className="time">{q.total_messages} msg</span>
@@ -3328,10 +3921,58 @@ function PerQueueCards({ queues, engines, editing, pending, saveStatus, setField
                                     </select>
                                 ) : <span style={{ color: 'var(--text-2)' }}>{q.settings.voice || <em style={{ color: 'var(--text-mute)' }}>inherit</em>}</span>}
                             </div>
+                            <div className="field-row" style={{ margin: 0, alignItems: 'center' }}>
+                                <label style={{ minWidth: 60 }}>Color</label>
+                                {isEd ? (
+                                    <>
+                                        <input
+                                            type="color"
+                                            value={color}
+                                            onChange={e => setField(q.queue, 'color', e.target.value)}
+                                            style={{ flex: '0 0 44px', height: 28, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                                            title="Per-queue accent color"
+                                        />
+                                        <button
+                                            className="btn subtle"
+                                            onClick={() => setField(q.queue, 'color', '')}
+                                            title="Clear -- fall back to auto-derived color"
+                                            style={{ marginLeft: 6 }}
+                                        >Auto</button>
+                                    </>
+                                ) : (
+                                    <span
+                                        title={q.settings.color}
+                                        style={{
+                                            display: 'inline-block',
+                                            width: 24, height: 24, borderRadius: 5,
+                                            background: q.settings.color,
+                                            border: '1px solid var(--border)',
+                                        }}
+                                    ></span>
+                                )}
+                            </div>
+                            <div className="field-row" style={{ margin: 0 }}>
+                                <label style={{ minWidth: 60 }}>Effects</label>
+                                {isEd ? (
+                                    <select
+                                        value={presetValue}
+                                        onChange={e => setField(q.queue, 'effects_preset', e.target.value)}
+                                    >
+                                        <option value="inherit">(global default)</option>
+                                        {presets.map(p => (
+                                            <option key={p.name} value={p.name}>
+                                                {p.name}{p.builtin ? '' : ' (custom)'}
+                                            </option>
+                                        ))}
+                                    </select>
+                                ) : <span style={{ color: 'var(--text-2)' }}>
+                                    {q.settings.effects_preset || <em style={{ color: 'var(--text-mute)' }}>(global)</em>}
+                                </span>}
+                            </div>
                         </div>
-                        <div className="card-footer">
+                        <div className="card-footer" style={{ marginTop: 12 }}>
                             <span className="save-success">{saveStatus[q.queue] || tryStatus[q.queue] || ''}</span>
-                            <div style={{ display: 'flex', gap: 6 }}>
+                            <div style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
                                 {!isEd && (
                                     <button
                                         className="btn-try"
@@ -3356,7 +3997,7 @@ function PerQueueCards({ queues, engines, editing, pending, saveStatus, setField
     );
 }
 
-function PerQueueTable({ queues, engines, editing, pending, saveStatus, setField, startEdit, cancelEdit, save, tryRow, tryStatus }) {
+function PerQueueTable({ queues, engines, presets, editing, pending, saveStatus, setField, startEdit, cancelEdit, save, tryRow, tryStatus }) {
     return (
         <table className="history-table">
             <thead>
@@ -3364,7 +4005,9 @@ function PerQueueTable({ queues, engines, editing, pending, saveStatus, setField
                     <th>Queue</th>
                     <th style={{ width: 130 }}>Engine</th>
                     <th style={{ width: 160 }}>Voice</th>
-                    <th style={{ width: 90 }}>Messages</th>
+                    <th style={{ width: 70 }}>Color</th>
+                    <th style={{ width: 140 }}>Effects</th>
+                    <th style={{ width: 70 }}>Msgs</th>
                     <th style={{ width: 230 }}></th>
                 </tr>
             </thead>
@@ -3373,9 +4016,18 @@ function PerQueueTable({ queues, engines, editing, pending, saveStatus, setField
                     const isEd = editing === q.queue;
                     const ed = pending[q.queue] || q.settings;
                     const engineVoices = engines.find(e => e.name === (ed.engine || q.settings.engine))?.voices || [];
+                    const color = ed.color || q.settings.color || '#7a8694';
+                    const rowStyle = { '--queue-color': color };
+                    const presetValue = ed.effects_preset || 'inherit';
                     return (
-                        <tr key={q.queue}>
-                            <td><code>{q.queue}</code></td>
+                        <tr key={q.queue} style={rowStyle}>
+                            <td>
+                                <code
+                                    className="queue-chip"
+                                    title={q.queue}
+                                    style={{ borderLeftColor: color }}
+                                >{truncateQueue(q.queue)}</code>
+                            </td>
                             <td>
                                 {isEd ? (
                                     <select value={ed.engine || ''}
@@ -3391,6 +4043,43 @@ function PerQueueTable({ queues, engines, editing, pending, saveStatus, setField
                                         {engineVoices.map(v => <option key={v.id} value={v.id}>{v.id}</option>)}
                                     </select>
                                 ) : <span>{q.settings.voice || <em style={{ color: 'var(--text-mute)' }}>inherit</em>}</span>}
+                            </td>
+                            <td>
+                                {isEd ? (
+                                    <input
+                                        type="color"
+                                        value={color}
+                                        onChange={e => setField(q.queue, 'color', e.target.value)}
+                                        style={{ width: 36, height: 26, padding: 0, border: 'none', background: 'transparent', cursor: 'pointer' }}
+                                        title="Per-queue accent color"
+                                    />
+                                ) : (
+                                    <span
+                                        title={q.settings.color}
+                                        style={{
+                                            display: 'inline-block',
+                                            width: 20, height: 20, borderRadius: 4,
+                                            background: q.settings.color,
+                                            border: '1px solid var(--border)',
+                                            verticalAlign: 'middle',
+                                        }}
+                                    ></span>
+                                )}
+                            </td>
+                            <td>
+                                {isEd ? (
+                                    <select
+                                        value={presetValue}
+                                        onChange={e => setField(q.queue, 'effects_preset', e.target.value)}
+                                    >
+                                        <option value="inherit">(global)</option>
+                                        {presets.map(p => (
+                                            <option key={p.name} value={p.name}>
+                                                {p.name}{p.builtin ? '' : ' (custom)'}
+                                            </option>
+                                        ))}
+                                    </select>
+                                ) : <span>{q.settings.effects_preset || <em style={{ color: 'var(--text-mute)' }}>(global)</em>}</span>}
                             </td>
                             <td>{q.total_messages}</td>
                             <td>
@@ -3485,6 +4174,19 @@ def interpretation_class(metadata: dict | None) -> str:
     if name == "ERROR":
         return "interp-error"
     return "interp-other"
+
+
+@lru_cache(maxsize=256)
+def _queue_color_for(queue: str | None) -> str:
+    """Per-queue accent color, cached. Resolves through get_settings so
+    explicit colors win over the auto-derived default.
+
+    The cache size of 256 fits most projects; collisions just trigger an
+    extra DB read. Cache is process-local so a daemon restart picks up
+    edits via the next page load.
+    """
+    s = get_settings(queue if queue != "default" else None)
+    return s.get("color") or "#7a8694"
 
 
 def render_metadata(metadata: dict | None) -> str:
@@ -3843,15 +4545,25 @@ async def api_items():
         meta_dict = item.get("metadata") or {}
         tts_error_msg = meta_dict.get("tts_error") if isinstance(meta_dict, dict) else None
 
+        # Per-queue accent color. Used by the UI for the card's left
+        # stripe and the table row's queue chip. Caching keyed on the
+        # queue id so we don't query settings per item.
+        queue_color = _queue_color_for(queue)
+
         result.append({
             "id": item["id"],
             "text": escape_html(strip_tone_tokens(item["text"])),
+            # Raw text (without tone tokens stripped) for the copy button.
+            # Kept separate from ``text`` so the displayed version can
+            # have HTML-escaped highlighting without polluting clipboard.
+            "raw_text": strip_tone_tokens(item["text"]),
             "time": format_time(item["created_at"]),
             "created_at_ms": created_at_ms,
             "played": bool(item["played_at"]),
             "has_audio": has_audio,
             "metadata": render_metadata(item.get("metadata")),
             "queue": queue,
+            "queue_color": queue_color,
             # CSS modifier for the interpretation accent stripe (left border).
             # Empty string when no outcome cue was set on the item.
             "interp_class": interpretation_class(item.get("metadata")),
@@ -4341,11 +5053,18 @@ async def api_global_settings():
 
 
 class SettingsUpdate(BaseModel):
-    """Partial update: only the fields supplied are written."""
+    """Partial update: only the fields supplied are written.
+
+    ``color`` accepts a hex string (``#aabbcc``) or empty string to clear
+    the override (auto-derived color resumes). ``effects_preset`` accepts
+    a known preset name or empty string to clear (global preset resumes).
+    """
     engine: str | None = None
     voice: str | None = None
     speed: float | None = None
     intro_sound: bool | None = None
+    color: str | None = None
+    effects_preset: str | None = None
     session: str | None = None  # None -> __global__
 
 
@@ -4356,13 +5075,35 @@ async def api_put_settings(body: SettingsUpdate):
     ``session=None`` writes the global default. Pass a queue id to write a
     per-queue override (matches the existing /settings POST behavior).
     """
+    # Validate color format if provided: hex like #rrggbb / #rgb, or empty
+    # string to clear. Other inputs reject early so the UI surfaces a
+    # consistent error before saving.
+    if body.color is not None and body.color.strip():
+        if not re.match(r"^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$", body.color.strip()):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid color {body.color!r}; expected #rgb or #rrggbb hex.",
+            )
+    # Validate effects preset against known names (built-in + custom).
+    if body.effects_preset is not None and body.effects_preset.strip():
+        from .effects import preset_names
+        if body.effects_preset not in preset_names():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown preset {body.effects_preset!r}. Known: {', '.join(preset_names())}",
+            )
     set_settings(
         session_id=body.session,
         engine=body.engine,
         voice=body.voice,
         speed=body.speed,
         intro_sound=body.intro_sound,
+        color=body.color,
+        effects_preset=body.effects_preset,
     )
+    # Invalidate the per-queue color cache so /api/items immediately
+    # picks up a color change without waiting for cache eviction.
+    _queue_color_for.cache_clear()
     return JSONResponse(get_settings(body.session))
 
 
@@ -4387,12 +5128,13 @@ async def api_queues():
 
 @router.get("/api/tones")
 async def api_get_tones():
-    """Get current intro/outro tone notes (and per-note duration)."""
+    """Get current intro/outro tone notes, duration, and effects toggle."""
     cfg = get_tones_config()
     return JSONResponse({
         "intro": cfg.get("intro", ["E4", "G4", "C5"]),
         "outro": cfg.get("outro", ["C5", "G4", "E4"]),
         "duration_seconds": cfg.get("duration_seconds", 0.12),
+        "apply_effects": bool(cfg.get("apply_effects", True)),
     })
 
 
@@ -4403,6 +5145,9 @@ class TonesUpdate(BaseModel):
     intro: list[str] | None = None
     outro: list[str] | None = None
     duration_seconds: float | None = None
+    # When True, the active effects preset is baked into synthesized
+    # tones (intro/outro/$Note/cue). When False, tones bypass the chain.
+    apply_effects: bool | None = None
 
 
 def _validate_notes(notes: list[str]) -> list[str]:
@@ -4440,11 +5185,14 @@ async def api_put_tones(body: TonesUpdate):
         tones["outro"] = _validate_notes(body.outro)
     if body.duration_seconds is not None:
         tones["duration_seconds"] = max(0.02, min(2.0, float(body.duration_seconds)))
+    if body.apply_effects is not None:
+        tones["apply_effects"] = bool(body.apply_effects)
     save_config(cfg)
     return JSONResponse({
         "intro": tones.get("intro", []),
         "outro": tones.get("outro", []),
         "duration_seconds": tones.get("duration_seconds", 0.12),
+        "apply_effects": bool(tones.get("apply_effects", True)),
         "message": "Saved. Takes effect on the next intro/outro batch.",
     })
 
@@ -4522,16 +5270,19 @@ async def api_get_effects():
     + descriptions. Power users can still inspect ``effects.PRESETS`` in
     source.
     """
+    from .effects import all_presets, is_builtin_preset
     current = get_effects_config().get("preset") or "off"
-    if current not in PRESETS:
+    presets_map = all_presets()
+    if current not in presets_map:
         current = "off"
     return JSONResponse({
         "current": current,
         "presets": [
             {
                 "name": name,
-                "description": PRESET_DESCRIPTIONS.get(name, ""),
-                "effect_count": len(PRESETS[name]),
+                "description": PRESET_DESCRIPTIONS.get(name, "Custom preset."),
+                "effect_count": len(presets_map[name]),
+                "builtin": is_builtin_preset(name),
             }
             for name in preset_names()
         ],
@@ -4546,12 +5297,12 @@ class EffectsUpdate(BaseModel):
 async def api_put_effects(body: EffectsUpdate):
     """Persist the active preset name to config.json.
 
-    Validates against the built-in ``PRESETS`` table. Takes effect on the
-    next utterance -- no daemon restart needed because
+    Validates against both built-in PRESETS and custom_presets. Takes
+    effect on the next utterance -- no daemon restart needed because
     ``apply_effects`` re-reads ``config.effects`` per call and the
     ``_build_board`` LRU cache rebuilds when the preset changes.
     """
-    if body.preset not in PRESETS:
+    if body.preset not in preset_names():
         raise HTTPException(
             status_code=400,
             detail=f"Unknown preset {body.preset!r}. Known: {', '.join(preset_names())}",
@@ -4563,6 +5314,206 @@ async def api_put_effects(body: EffectsUpdate):
         "current": body.preset,
         "restart_required": False,
         "message": "Saved. Takes effect on the next utterance.",
+    })
+
+
+# ----- Effects Preset Editor (CRUD for custom presets).
+#
+# Built-in presets are read-only -- listed but never mutated. Custom
+# presets live in ``config.effects.custom_presets`` as ``{name: [{name,
+# params}, ...]}``. The merged set (builtins + customs) is what
+# ``apply_effects`` resolves against; a custom that shadows a built-in
+# name wins.
+
+@router.get("/api/effects/plugins")
+async def api_effects_plugins():
+    """Catalog of pedalboard plugins available for the editor.
+
+    Each entry includes its constructor parameters (name, type, default,
+    min/max, step) so the UI can render parameter sliders/inputs
+    consistently. The list is curated rather than introspected -- many
+    pedalboard parameters are read-only state that shouldn't appear in
+    a user editor.
+    """
+    from .effects import plugin_catalog
+    return JSONResponse({"plugins": plugin_catalog()})
+
+
+def _normalize_preset_effects(effects: list) -> list[dict]:
+    """Validate and normalize an effects chain for storage.
+
+    Each entry must be ``{"name": str, "params": dict}`` where ``name``
+    is a known plugin. Unknown plugin names or non-dict params raise 400.
+    Missing parameters fall back to their plugin defaults at instantiate
+    time (pedalboard's responsibility), so the stored chain only carries
+    the values the user actually set.
+    """
+    from .effects import plugin_catalog
+    catalog = plugin_catalog()
+    normalized: list[dict] = []
+    for idx, entry in enumerate(effects):
+        if not isinstance(entry, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Effect {idx}: must be an object.",
+            )
+        cls_name = entry.get("name")
+        params = entry.get("params") or {}
+        if not isinstance(cls_name, str) or cls_name not in catalog:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Effect {idx}: unknown plugin {cls_name!r}. Known: {', '.join(sorted(catalog))}",
+            )
+        if not isinstance(params, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Effect {idx}: params must be an object.",
+            )
+        # Coerce numeric params and reject unknown keys so a typo doesn't
+        # silently round-trip through the editor as dead data.
+        param_specs = {p["name"]: p for p in catalog[cls_name]}
+        cleaned_params: dict = {}
+        for k, v in params.items():
+            if k not in param_specs:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Effect {idx} ({cls_name}): unknown parameter {k!r}.",
+                )
+            try:
+                cleaned_params[k] = float(v)
+            except (TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Effect {idx} ({cls_name}.{k}): expected number, got {v!r}.",
+                )
+        normalized.append({"name": cls_name, "params": cleaned_params})
+    return normalized
+
+
+def _custom_preset_name_ok(name: str) -> tuple[bool, str]:
+    """Validate a custom preset name. Returns (ok, error_message)."""
+    if not isinstance(name, str) or not name.strip():
+        return False, "name must be a non-empty string"
+    name = name.strip()
+    if len(name) > 40:
+        return False, "name too long (max 40 chars)"
+    if not re.match(r"^[A-Za-z0-9 _\-]+$", name):
+        return False, "name may only contain letters, digits, spaces, _ and -"
+    # Built-ins are read-only -- protect 'off' especially since it's the
+    # passthrough sentinel.
+    from .effects import is_builtin_preset
+    if is_builtin_preset(name):
+        return False, f"{name!r} is a built-in preset and cannot be overwritten"
+    return True, ""
+
+
+class CustomPresetBody(BaseModel):
+    name: str
+    effects: list[dict]
+
+
+@router.post("/api/effects/presets")
+async def api_create_custom_preset(body: CustomPresetBody):
+    """Create a new custom preset. 409 if the name already exists."""
+    ok, err = _custom_preset_name_ok(body.name)
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    name = body.name.strip()
+    cfg = get_config()
+    custom = cfg.setdefault("effects", {}).setdefault("custom_presets", {})
+    if name in custom:
+        raise HTTPException(status_code=409, detail=f"Preset {name!r} already exists; use PUT to update.")
+    custom[name] = _normalize_preset_effects(body.effects)
+    save_config(cfg)
+    return JSONResponse({"name": name, "effects": custom[name], "message": "Created."})
+
+
+class CustomPresetUpdate(BaseModel):
+    """PUT body. ``rename`` lets the editor change a preset's name as
+    part of the same save (avoids a delete+create dance the UI would
+    otherwise have to orchestrate)."""
+    effects: list[dict]
+    rename: str | None = None
+
+
+@router.put("/api/effects/presets/{name}")
+async def api_update_custom_preset(name: str, body: CustomPresetUpdate):
+    """Update an existing custom preset (effects chain and optionally name).
+
+    404 if the preset doesn't exist. 400 if validation fails. Rename
+    target must pass the same name rules; existing target name returns 409.
+    """
+    cfg = get_config()
+    custom = cfg.setdefault("effects", {}).setdefault("custom_presets", {})
+    if name not in custom:
+        raise HTTPException(status_code=404, detail=f"Custom preset {name!r} not found.")
+    new_effects = _normalize_preset_effects(body.effects)
+    target_name = name
+    if body.rename and body.rename != name:
+        ok, err = _custom_preset_name_ok(body.rename)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+        target_name = body.rename.strip()
+        if target_name in custom:
+            raise HTTPException(status_code=409, detail=f"Preset {target_name!r} already exists.")
+        del custom[name]
+        # If the renamed preset was the active default, follow the rename
+        # so the user doesn't silently fall off it.
+        if cfg.get("effects", {}).get("preset") == name:
+            cfg["effects"]["preset"] = target_name
+    custom[target_name] = new_effects
+    save_config(cfg)
+    return JSONResponse({
+        "name": target_name,
+        "effects": new_effects,
+        "renamed_from": name if target_name != name else None,
+        "message": "Saved.",
+    })
+
+
+@router.delete("/api/effects/presets/{name}")
+async def api_delete_custom_preset(name: str):
+    """Delete a custom preset. 404 if missing, 400 for built-ins.
+
+    If the deleted preset was the active default, fall back to ``off``
+    so the next utterance doesn't try to resolve a now-missing name.
+    """
+    from .effects import is_builtin_preset
+    if is_builtin_preset(name):
+        raise HTTPException(status_code=400, detail=f"{name!r} is a built-in preset.")
+    cfg = get_config()
+    custom = cfg.setdefault("effects", {}).setdefault("custom_presets", {})
+    if name not in custom:
+        raise HTTPException(status_code=404, detail=f"Custom preset {name!r} not found.")
+    del custom[name]
+    fell_back = False
+    if cfg.get("effects", {}).get("preset") == name:
+        cfg["effects"]["preset"] = "off"
+        fell_back = True
+    save_config(cfg)
+    return JSONResponse({
+        "deleted": name,
+        "default_reset_to_off": fell_back,
+        "message": "Deleted." + (" Default fell back to 'off'." if fell_back else ""),
+    })
+
+
+@router.get("/api/effects/presets/{name}")
+async def api_get_custom_preset(name: str):
+    """Return the effects chain for one preset (built-in or custom)."""
+    from .effects import all_presets
+    presets = all_presets()
+    if name not in presets:
+        raise HTTPException(status_code=404, detail=f"Preset {name!r} not found.")
+    chain = [
+        {"name": spec.name, "params": dict(spec.params)}
+        for spec in presets[name]
+    ]
+    from .effects import is_builtin_preset
+    return JSONResponse({
+        "name": name,
+        "builtin": is_builtin_preset(name),
+        "effects": chain,
     })
 
 

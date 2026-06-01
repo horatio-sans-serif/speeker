@@ -464,6 +464,23 @@ def generate_tts(
         ) from e
 
 
+def _tones_effects_suffix() -> str:
+    """Return a cache-key suffix capturing the active tones-effects state.
+
+    When ``tones.apply_effects`` is True AND the active effects preset is
+    not ``off``, the rendered WAV bakes in the chain -- so a flip from
+    ``natural`` to ``robot`` (or toggling apply_effects off) must yield a
+    different cache key. Empty string means "no effects bake".
+    """
+    from .config import get_tones_config, get_effects_config
+    if not bool(get_tones_config().get("apply_effects", True)):
+        return ""
+    preset = (get_effects_config().get("preset") or "off").strip()
+    if preset == "off":
+        return ""
+    return f"_fx-{preset}"
+
+
 def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8) -> Path:
     """Generate a single WAV with tones using the tones library.
 
@@ -472,6 +489,11 @@ def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8
     per-note length is ``duration * multiplier``. A tune like
     ``["G4", "E4", "C5:4"]`` therefore plays two short notes and one
     long-ringing note -- the canonical NBC chime pattern.
+
+    When ``tones.apply_effects`` is True (default) and an effects preset
+    is active, the synthesized WAV is post-processed through the chain
+    so tones share the same audio character as TTS speech. The preset
+    name is folded into the cache key so toggling presets regenerates.
     """
     from tones import SINE_WAVE
     from tones.mixer import Mixer
@@ -480,8 +502,10 @@ def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8
     # rendered audio for tokens that carry a `:N` suffix. Tokens without
     # the suffix still render identically to v6, but the version bump
     # also guarantees a clean break for any cached files that happen to
-    # share a name pattern.
-    cache_key = "_".join(tokens) + f"_{duration}_v7"
+    # share a name pattern. The fx- suffix isolates effects-processed
+    # variants from the dry baseline.
+    fx_suffix = _tones_effects_suffix()
+    cache_key = "_".join(tokens) + f"_{duration}_v7{fx_suffix}"
     if cache_key in _tone_cache and _tone_cache[cache_key].exists():
         return _tone_cache[cache_key]
 
@@ -506,6 +530,12 @@ def generate_combined_tones_from_tokens(tokens: list[str], duration: float = 0.8
             mixer.add_note(0, note=note, octave=octave, duration=duration * multiplier)
 
     mixer.write_wav(str(tone_path))
+    # Bake the active effects chain into the file when enabled. apply_effects_to_wav
+    # is a no-op for preset=off or missing pedalboard, so this is safe to
+    # always call -- the fx_suffix above ensures cache integrity either way.
+    if fx_suffix:
+        from .effects import apply_effects_to_wav
+        apply_effects_to_wav(tone_path)
     _tone_cache[cache_key] = tone_path
     return tone_path
 
@@ -552,13 +582,15 @@ def synthesize_note_cue(name: str, spec: list[tuple[str, int, float]]) -> Path |
     from tones.mixer import Mixer
 
     digest = hashlib.md5(repr(spec).encode()).hexdigest()[:10]
-    cache_key = f"{name}_{digest}"
+    fx_suffix = _tones_effects_suffix()
+    cache_key = f"{name}_{digest}{fx_suffix}"
     cached = _interpretation_cue_cache.get(cache_key)
     if cached and cached.exists():
         return cached
 
     tone_dir = ensure_dir(_tones_dir())
-    cue_path = tone_dir / f"cue_{cache_key}.wav"
+    safe_key = cache_key.replace(":", "x")
+    cue_path = tone_dir / f"cue_{safe_key}.wav"
     if cue_path.exists():
         _interpretation_cue_cache[cache_key] = cue_path
         return cue_path
@@ -570,6 +602,9 @@ def synthesize_note_cue(name: str, spec: list[tuple[str, int, float]]) -> Path |
         mixer.add_note(0, note=note, octave=octave, duration=seconds)
 
     mixer.write_wav(str(cue_path))
+    if fx_suffix:
+        from .effects import apply_effects_to_wav
+        apply_effects_to_wav(cue_path)
     _interpretation_cue_cache[cache_key] = cue_path
     return cue_path
 
@@ -1052,7 +1087,14 @@ def process_queue(verbose: bool = False) -> int:
                 line_voice = meta.get("voice") or settings["voice"]
                 line_polly_engine = meta.get("polly_engine")
                 line_interpretation = meta.get("interpretation")
-                line_effects_preset = meta.get("effects_preset")
+                # Effects preset cascade (highest priority first):
+                #   per-item metadata override (e.g. /api/effects/try)
+                #   per-queue setting (settings.effects_preset)
+                #   None -> generate_tts falls back to global config
+                line_effects_preset = (
+                    meta.get("effects_preset")
+                    or settings.get("effects_preset")
+                )
                 td_raw = meta.get("tone_duration")
                 # ``bool`` is a subclass of ``int`` in Python, so a stray
                 # ``"tone_duration": true`` in metadata would otherwise
