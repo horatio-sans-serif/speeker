@@ -844,6 +844,40 @@ HTML_TEMPLATE = """
         }
         .ios-switch input:checked + .slider::before { transform: translateX(18px); }
         .pron-disabled { opacity: 0.45; }  /* visual cue only; rows stay editable */
+        /* Generate-tab recent-text history entries. */
+        .gen-history-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            width: 100%;
+            text-align: left;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            cursor: pointer;
+            font: inherit;
+            color: var(--text-1);
+            transition: background 0.12s, border-color 0.12s;
+        }
+        .gen-history-item:hover {
+            background: var(--surface-3);
+            border-color: var(--accent-line);
+        }
+        .gen-history-text {
+            flex: 1;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .gen-history-time {
+            flex-shrink: 0;
+            color: var(--text-3);
+            font-size: 0.82em;
+            white-space: nowrap;
+        }
         .restart-banner {
             background: var(--accent-soft);
             color: var(--warn);
@@ -2356,6 +2390,17 @@ function GenerateView() {
     const [result, setResult] = useState(null);    // {queue_id, audio_url, download_wav, download_mp3, size_bytes, ...}
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState('');
+    // Local-only history of generated text, restored on load. Click an entry
+    // to load it back into the textbox. Stored as [{text, ts}], newest first.
+    const [history, setHistory] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('speeker.generateHistory') || '[]'); }
+        catch (e) { return []; }
+    });
+    const persistHistory = (list) => {
+        setHistory(list);
+        try { localStorage.setItem('speeker.generateHistory', JSON.stringify(list)); }
+        catch (e) {}
+    };
 
     // Initial load: engines + saved global defaults so the dropdowns
     // mirror what the user expects from Settings.
@@ -2410,6 +2455,9 @@ function GenerateView() {
             }
             const data = await resp.json();
             setResult(data);
+            // Record into local history (dedupe by text, newest first, cap 25).
+            const entry = { text: t, ts: Date.now() };
+            persistHistory([entry, ...history.filter(h => h.text !== t)].slice(0, 25));
         } catch (e) {
             setError('Failed: ' + e.message);
         } finally {
@@ -2549,6 +2597,31 @@ function GenerateView() {
                             style={{ marginLeft: 'auto' }}
                             title="Open the queue history with this generation visible"
                         >Open in history</a>
+                    </div>
+                </div>
+            )}
+
+            {history.length > 0 && (
+                <div style={{ marginTop: 24 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                        <strong style={{ color: 'var(--text-1)' }}>Recent</strong>
+                        <button className="btn subtle" onClick={() => persistHistory([])}>Clear</button>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                        {history.map((h, i) => (
+                            <button
+                                key={i}
+                                type="button"
+                                className="gen-history-item"
+                                onClick={() => { setText(h.text); setError(''); }}
+                                title="Click to load this text back into the box"
+                            >
+                                <span className="gen-history-text">{h.text}</span>
+                                <span className="gen-history-time">
+                                    {relativeTime(h.ts, new Date(h.ts).toLocaleString())}
+                                </span>
+                            </button>
+                        ))}
                     </div>
                 </div>
             )}
