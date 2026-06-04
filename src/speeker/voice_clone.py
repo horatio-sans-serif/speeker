@@ -223,6 +223,7 @@ def clone_voice(
     start_secs: float = 0,
     duration_secs: float = 30,
     description: str | None = None,
+    provider: str = "local",
 ) -> Path:
     """Clone a voice from one or more audio/video sources.
 
@@ -230,17 +231,26 @@ def clone_voice(
     Downloads if needed, extracts audio, trims, and saves to the voice's
     directory under _voices_dir()/<name>/.
 
+    The audio-prep pipeline runs for both providers (keeping the local audit
+    trail and a usable reference.wav). ``provider="local"`` uses the resulting
+    reference.wav directly with pocket-tts; ``provider="elevenlabs"`` also
+    uploads the trimmed clips to create a server-side Instant Voice Clone and
+    records its voice_id.
+
     All intermediate files (downloads, extractions, trims) are kept
     for later re-use and inspection.
 
     Returns the path to the saved reference WAV.
     """
+    if provider not in ("local", "elevenlabs"):
+        raise ValueError(f"Unknown provider: {provider!r} (expected 'local' or 'elevenlabs')")
+
     voice_dir = _get_voice_dir(name)
     voice_dir.mkdir(parents=True, exist_ok=True)
 
     log = _get_voice_log(name)
     log.info("=" * 60)
-    log.info("Clone voice: %s", name)
+    log.info("Clone voice: %s (provider=%s)", name, provider)
     log.info("Sources: %s", sources)
     log.info("Start: %gs, Duration: %gs", start_secs, duration_secs)
 
@@ -285,17 +295,34 @@ def clone_voice(
         _concatenate_audio(extracted_clips, final_path)
         log.info("Concatenated %d clips -> reference.wav (%d bytes)", len(extracted_clips), final_path.stat().st_size)
 
+    description = description or f"Cloned from {len(sources)} source(s)"
+
+    # For ElevenLabs, upload the prepared clips to create a server-side
+    # Instant Voice Clone. Uploading the per-source trimmed clips (rather than
+    # the single concatenated reference) preserves the multi-sample benefit.
+    voice_id: str | None = None
+    if provider == "elevenlabs":
+        from . import elevenlabs_api
+
+        log.info("Creating ElevenLabs IVC voice from %d clip(s)", len(extracted_clips))
+        voice_id = elevenlabs_api.create_ivc_voice(name, description, extracted_clips)
+        log.info("ElevenLabs voice created: %s", voice_id)
+
     # Update manifest
     manifest = _load_manifest()
-    manifest[name] = {
+    entry = {
         "voice_dir": str(voice_dir),
         "audio_path": str(final_path),
-        "description": description or f"Cloned from {len(sources)} source(s)",
+        "provider": provider,
+        "description": description,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "sources": sources,
         "start_secs": start_secs,
         "duration_secs": duration_secs,
     }
+    if voice_id is not None:
+        entry["voice_id"] = voice_id
+    manifest[name] = entry
     _save_manifest(manifest)
     log.info("Manifest updated. Voice ready: %s", name)
 
@@ -348,21 +375,61 @@ def get_custom_voices() -> dict[str, dict]:
 
 
 def get_custom_voice_path(name: str) -> Path | None:
-    """Look up a custom voice's audio path by name."""
-    manifest = _load_manifest()
-    entry = manifest.get(name)
-    if entry:
-        path = Path(entry["audio_path"])
-        if path.exists():
-            return path
+    """Look up a custom voice's audio path by name.
+
+    The manifest stores an absolute ``audio_path``, but the data directory can
+    move (e.g. the legacy ~/.speeker -> XDG migration), leaving that path
+    stale. When the stored path is missing, fall back to the canonical
+    current location (voices_dir/<safe-name>/reference.wav) so a moved data
+    dir doesn't silently drop the voice back to the default.
+    """
+    entry = _load_manifest().get(name)
+    if not entry:
+        return None
+    stored = Path(entry["audio_path"])
+    if stored.exists():
+        return stored
+    canonical = _get_voice_dir(name) / "reference.wav"
+    if canonical.exists():
+        return canonical
+    return None
+
+
+def get_custom_voice_provider(name: str) -> str | None:
+    """Return a custom voice's provider, or None if the voice is unknown.
+
+    Entries created before providers existed have no ``provider`` key and are
+    treated as ``"local"`` (pocket-tts).
+    """
+    entry = _load_manifest().get(name)
+    if entry is None:
+        return None
+    return entry.get("provider", "local")
+
+
+def get_elevenlabs_voice_id(name: str) -> str | None:
+    """Return the ElevenLabs voice_id for a cloned voice name, else None."""
+    entry = _load_manifest().get(name)
+    if entry and entry.get("provider") == "elevenlabs":
+        return entry.get("voice_id")
     return None
 
 
 def delete_custom_voice(name: str) -> bool:
-    """Delete a custom voice from manifest and disk (removes entire voice directory)."""
+    """Delete a custom voice from manifest and disk (removes entire voice directory).
+
+    For elevenlabs-provider voices, also deletes the server-side voice
+    (best-effort) so a delete here doesn't orphan a paid cloud voice.
+    """
     manifest = _load_manifest()
     if name not in manifest:
         return False
+
+    entry = manifest[name]
+    if entry.get("provider") == "elevenlabs" and entry.get("voice_id"):
+        from . import elevenlabs_api
+
+        elevenlabs_api.delete_voice(entry["voice_id"])
 
     # Remove the entire voice directory
     voice_dir = _get_voice_dir(name)

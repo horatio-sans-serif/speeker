@@ -15,7 +15,43 @@ from speeker.engines import (
     get_engine,
     unload_all,
     prepare_payload,
+    _ensure_min_leading_silence,
 )
+
+
+class TestLeadingSilence:
+    SR = 24000
+
+    def test_pads_hot_start(self):
+        hot = np.ones(self.SR, dtype=np.float32)  # full amplitude from sample 0
+        out = _ensure_min_leading_silence(hot, self.SR, min_seconds=0.25)
+        onset = int(np.argmax(np.abs(out) > 0.02))
+        assert onset / self.SR >= 0.25 - 1e-6
+        assert out.size > hot.size
+
+    def test_noop_when_enough_silence(self):
+        a = np.concatenate([np.zeros(self.SR, dtype=np.float32),  # 1s silence
+                            np.ones(self.SR, dtype=np.float32)])
+        out = _ensure_min_leading_silence(a, self.SR, min_seconds=0.25)
+        assert out is a  # unchanged
+
+    def test_empty_audio_unchanged(self):
+        a = np.zeros(0, dtype=np.float32)
+        assert _ensure_min_leading_silence(a, self.SR).size == 0
+
+    def test_pocket_engine_applies_lead_in(self):
+        eng = PocketTTSEngine()
+        fake_model = MagicMock()
+        fake_model.sample_rate = self.SR
+        fake_model.get_state_for_audio_prompt.return_value = "state"
+        hot = MagicMock()
+        hot.numpy.return_value = np.ones(self.SR, dtype=np.float32)
+        fake_model.generate_audio.return_value = hot
+        eng._model = fake_model
+
+        audio, sr = eng.generate("hi", "azelma")
+        assert sr == self.SR
+        assert int(np.argmax(np.abs(audio) > 0.02)) / sr >= 0.25 - 1e-6
 
 
 class TestRegistry:
@@ -49,6 +85,57 @@ class TestRegistry:
         a = get_engine("pocket-tts")
         unload_all()
         assert get_engine("pocket-tts") is not a
+
+
+class TestPocketTTSVoiceStateCache:
+    """The voice-state cache must key on the RESOLVED voice, not the name.
+
+    A custom voice whose reference path is briefly unresolvable falls back to
+    the default voice. If the cache keyed on the name, that fallback state
+    would be served forever even after the path becomes resolvable. Keying on
+    the resolved identifier prevents that staleness.
+    """
+
+    def test_cache_keys_on_resolved_voice_not_name(self):
+        eng = PocketTTSEngine()
+        # Fake model: state for a prompt is just the prompt identifier itself.
+        fake_model = MagicMock()
+        fake_model.get_state_for_audio_prompt.side_effect = (
+            lambda v, truncate=False: f"state:{v}"
+        )
+        eng._model = fake_model
+
+        from speeker import voices
+        from pathlib import Path
+
+        # First call: name resolves to the default fallback (broken path).
+        with patch.object(voices, "get_pocket_tts_voice_path", return_value="azelma"):
+            first = eng._voice_state("David Attenborough")
+        assert first == "state:azelma"
+
+        # Path now resolves: a fresh, correct state must be produced.
+        real = Path("/v/david_attenborough/reference.wav")
+        with patch.object(voices, "get_pocket_tts_voice_path", return_value=real):
+            second = eng._voice_state("David Attenborough")
+        assert second == f"state:{real}"
+
+    def test_audio_prompt_is_truncated(self):
+        # pocket-tts 2.x emits immediate EOS on long un-truncated audio prompts;
+        # the engine must pass truncate=True (matching pocket-tts's own usage).
+        eng = PocketTTSEngine()
+        fake_model = MagicMock()
+        fake_model.get_state_for_audio_prompt.return_value = "state"
+        eng._model = fake_model
+
+        from speeker import voices
+        from pathlib import Path
+
+        ref = Path("/v/custom/reference.wav")
+        with patch.object(voices, "get_pocket_tts_voice_path", return_value=ref):
+            eng._voice_state("Custom")
+
+        _, kwargs = fake_model.get_state_for_audio_prompt.call_args
+        assert kwargs.get("truncate") is True
 
 
 class _FakeSsmlEngine(BaseEngine):

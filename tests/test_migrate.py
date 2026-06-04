@@ -1,10 +1,63 @@
 #!/usr/bin/env python3
 """Unit tests for migrate.py - auto-migration from legacy paths."""
 
+import json
 import os
 from unittest.mock import patch
 
-from speeker.migrate import migrate, _needs_migration, _move
+from speeker.migrate import (
+    migrate,
+    _needs_migration,
+    _move,
+    _rewrite_voice_manifest_paths,
+)
+
+
+class TestRewriteVoiceManifestPaths:
+    """Stale absolute paths must be rewritten to the moved location."""
+
+    def test_rewrites_stale_paths(self, tmp_path):
+        voices_root = tmp_path / "new" / "voices"
+        moved_dir = voices_root / "david_attenborough"
+        moved_dir.mkdir(parents=True)
+        (moved_dir / "reference.wav").write_bytes(b"wav")
+
+        manifest_path = voices_root / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "David Attenborough": {
+                "voice_dir": "/old/.speeker/var/voices/david_attenborough",
+                "audio_path": "/old/.speeker/var/voices/david_attenborough/reference.wav",
+                "description": "d", "created_at": "",
+            }
+        }))
+
+        with patch("speeker.migrate.paths.voices_manifest", return_value=manifest_path):
+            with patch("speeker.migrate.paths.voices_dir", return_value=voices_root):
+                _rewrite_voice_manifest_paths()
+
+        entry = json.loads(manifest_path.read_text())["David Attenborough"]
+        assert entry["audio_path"] == str(moved_dir / "reference.wav")
+        assert entry["voice_dir"] == str(moved_dir)
+
+    def test_leaves_valid_paths_untouched(self, tmp_path):
+        voices_root = tmp_path / "voices"
+        vdir = voices_root / "ok"
+        vdir.mkdir(parents=True)
+        ref = vdir / "reference.wav"
+        ref.write_bytes(b"wav")
+
+        manifest_path = voices_root / "manifest.json"
+        original = {
+            "OK": {"voice_dir": str(vdir), "audio_path": str(ref),
+                   "description": "d", "created_at": ""}
+        }
+        manifest_path.write_text(json.dumps(original))
+
+        with patch("speeker.migrate.paths.voices_manifest", return_value=manifest_path):
+            with patch("speeker.migrate.paths.voices_dir", return_value=voices_root):
+                _rewrite_voice_manifest_paths()
+
+        assert json.loads(manifest_path.read_text()) == original
 
 
 class TestNeedsMigration:

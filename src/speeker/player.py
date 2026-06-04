@@ -598,8 +598,15 @@ def synthesize_note_cue(name: str, spec: list[tuple[str, int, float]]) -> Path |
     mixer = Mixer(44100, 0.5)
     mixer.create_track(0, SINE_WAVE, vibrato_frequency=5.5, vibrato_variance=0.02,
                        attack=0.01, decay=0.3)
+    prev: tuple[str, int] | None = None
     for note, octave, seconds in spec:
+        # A short rest between two consecutive identical notes makes a
+        # repeated-note cue (e.g. WARNING's double Eb4) read clearly as two
+        # tones rather than one slightly-wobbly tone.
+        if prev == (note, octave):
+            mixer.add_silence(0, duration=0.08)
         mixer.add_note(0, note=note, octave=octave, duration=seconds)
+        prev = (note, octave)
 
     mixer.write_wav(str(cue_path))
     if fx_suffix:
@@ -716,16 +723,16 @@ def speak_text(
 ) -> Path | None:
     """Generate and play TTS for text. Handles leading $Note tone tokens.
 
-    When the text carries a leading ``$Note`` tone token, the TTS audio
-    is generated in a background thread *while* the tone plays. Polly's
-    ~1-2s API call thus overlaps the ~0.5s tone, so the speech starts
-    immediately after the tone -- no dead-air gap between them. Without
-    this overlap the listener hears: tone, silence (TTS gen), speech.
-    Both operations are blocking I/O, so threading is safe (the GIL
-    releases on both ``afplay`` waits and on the Polly socket).
-    """
-    import threading
+    The TTS audio is generated *first*, then any leading ``$Note`` tone plays
+    immediately before the speech, then the speech, then any trailing tone:
 
+        generate -> leading tone -> speech -> trailing tone
+
+    Generating before the tone means a slow engine (e.g. chunked Polly on a
+    long passage) leaves no dead air between the tone and the speech -- the
+    tone always sits right against the utterance. On generation failure we
+    raise before any tone plays, so a failed item produces no orphan tone.
+    """
     leading_tones, clean_text, trailing_tones = extract_tone_tokens(text)
 
     def _play_trailing():
@@ -740,59 +747,18 @@ def speak_text(
         _play_trailing()
         return save_path
 
-    # Only-speech case: no leading tone to overlap, run sequentially.
-    # Trailing tones still play after the speech finishes. ``generate_tts``
-    # raises ``TTSError`` on failure -- we let it propagate so
-    # ``process_queue`` can drive the retry policy. The trailing tones
-    # are skipped on TTS failure (no speech to bookend).
-    if not leading_tones:
-        audio_path = generate_tts(
-            clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose,
-            engine=engine, is_ssml=is_ssml, polly_engine=polly_engine,
-            effects_preset=effects_preset,
-        )
-        try:
-            play_audio(audio_path, verbose)
-        finally:
-            if save_path is None and audio_path:
-                try:
-                    audio_path.unlink()
-                except OSError:
-                    pass
-        _play_trailing()
-        return save_path
+    # Generate first. ``generate_tts`` raises ``TTSError`` on failure -- we
+    # let it propagate *before any tone plays* so ``process_queue`` can drive
+    # the retry policy and no orphan tone is heard for a failed item.
+    audio_path = generate_tts(
+        clean_text, voice=voice, speed=speed, save_path=save_path, verbose=verbose,
+        engine=engine, is_ssml=is_ssml, polly_engine=polly_engine,
+        effects_preset=effects_preset,
+    )
 
-    # Leading tone + speech: overlap TTS generation with tone playback,
-    # then play trailing tones (if any) after the speech finishes.
-    result: list[Path | None] = [None]
-    error: list[BaseException | None] = [None]
-
-    def _gen():
-        try:
-            result[0] = generate_tts(
-                clean_text, voice=voice, speed=speed, save_path=save_path,
-                verbose=verbose, engine=engine, is_ssml=is_ssml,
-                polly_engine=polly_engine, effects_preset=effects_preset,
-            )
-        except BaseException as e:  # noqa: BLE001 - record to surface in caller thread
-            error[0] = e
-
-    gen_thread = threading.Thread(target=_gen, daemon=True, name="speeker-tts-gen")
-    gen_thread.start()
-    play_tone_tokens(leading_tones, verbose, duration=tone_duration)
-    gen_thread.join()
-
-    if error[0] is not None:
-        # The leading tone already played. Surface the failure so
-        # ``process_queue`` can record it and decide whether to retry.
-        # Already a ``TTSError`` if it came from generate_tts; otherwise
-        # wrap so callers always see a consistent type.
-        if isinstance(error[0], TTSError):
-            raise error[0]
-        raise TTSError(
-            str(error[0]), engine=engine, voice=voice, text=clean_text,
-        ) from error[0]
-    audio_path = result[0]
+    # Leading tone immediately before the speech, then speech, then trailing.
+    if leading_tones:
+        play_tone_tokens(leading_tones, verbose, duration=tone_duration)
     try:
         play_audio(audio_path, verbose)
     finally:
@@ -1314,9 +1280,23 @@ def run_daemon(verbose: bool = False) -> None:
 
     last_activity = time.time()
     model_loaded = idle_timeout == 0
+    paused_for_call = False
 
     try:
         while True:
+            # Hold the queue while a call is active (mic in use). Pending items
+            # are left untouched and flush automatically when the call ends.
+            from .calls import should_pause_for_call
+            if should_pause_for_call():
+                if not paused_for_call:
+                    paused_for_call = True
+                    print("[INFO] Call active -- pausing queue", file=sys.stderr, flush=True)
+                time.sleep(POLL_INTERVAL)
+                continue
+            if paused_for_call:
+                paused_for_call = False
+                print("[INFO] Call ended -- resuming queue", file=sys.stderr, flush=True)
+
             pending = get_pending_count()
 
             if pending > 0:

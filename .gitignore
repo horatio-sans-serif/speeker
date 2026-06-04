@@ -12,3 +12,6 @@ build/
 .mypy_cache/
 .DS_Store
 .coverage
+
+# Large local source media for voice cloning (not version-controlled)
+voices-sources/

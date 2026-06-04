@@ -230,11 +230,15 @@ def _load_pronunciation_overrides(engine: str | None = None) -> tuple[tuple[re.P
     or updating the config recomputes naturally.
     """
     try:
+        from .config import get_pronunciation_disabled
         raw = get_pronunciation_overrides()
+        disabled = get_pronunciation_disabled()
     except Exception:
         return ()
     resolved: list[tuple[str, str]] = []
     for word, value in raw.items():
+        if word in disabled:
+            continue
         chosen = _resolve_override_value(value, engine)
         if chosen:
             resolved.append((word, chosen))

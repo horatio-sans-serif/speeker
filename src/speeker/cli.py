@@ -34,7 +34,7 @@ from .engines import get_engine, prepare_payload
 from .ssml import looks_like_ssml
 from .config import get_ssml_config
 
-KNOWN_ENGINES = ("pocket-tts", "kokoro", "polly")
+KNOWN_ENGINES = ("pocket-tts", "kokoro", "polly", "elevenlabs")
 
 
 def get_queue_file() -> Path:
@@ -293,6 +293,27 @@ def speak_text(
         return False
 
 
+def _resolve_engine(args: argparse.Namespace) -> str:
+    """Resolve the engine to use.
+
+    An explicit -e wins. Otherwise, when -v names a cloned voice, pick the
+    engine that owns it (local -> pocket-tts, elevenlabs -> elevenlabs) so a
+    voice "just works" with -v alone. Falls back to the default engine.
+    """
+    if args.engine:
+        return args.engine
+    voice = getattr(args, "voice", None)
+    if voice:
+        from .voice_clone import get_custom_voice_provider
+
+        provider = get_custom_voice_provider(voice)
+        if provider == "elevenlabs":
+            return "elevenlabs"
+        if provider == "local":
+            return "pocket-tts"
+    return DEFAULT_ENGINE
+
+
 def _resolve_voice(args: argparse.Namespace, engine: str) -> str:
     """Resolve the voice to use, honoring --polly-voice and per-variant defaults."""
     if engine == "polly" and getattr(args, "polly_voice", None):
@@ -385,7 +406,7 @@ def stream_sentences_from_stdin():
 
 def cmd_speak_stream(args: argparse.Namespace) -> int:
     """Handle streaming speak mode - process sentences as they arrive."""
-    engine = args.engine or DEFAULT_ENGINE
+    engine = _resolve_engine(args)
     voice = _resolve_voice(args, engine)
     _apply_aws_profile(args)
 
@@ -428,7 +449,7 @@ def cmd_speak(args: argparse.Namespace) -> int:
         print("Error: No text provided", file=sys.stderr)
         return 1
 
-    engine = args.engine or DEFAULT_ENGINE
+    engine = _resolve_engine(args)
     voice = _resolve_voice(args, engine)
     _apply_aws_profile(args)
 
@@ -490,6 +511,18 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     print(f"Data directory: {data_dir()}")
     print(f"Player running: {'yes' if is_player_running() else 'no'}")
+
+    from .config import get_calls_config
+    from .calls import call_status
+    calls_cfg = get_calls_config()
+    status = call_status()
+    if status == "unavailable":
+        calls_line = "monitor not installed"
+    elif status == "active":
+        calls_line = "active (pausing)" if calls_cfg.get("pause_when_active") else "active"
+    else:
+        calls_line = "idle"
+    print(f"Calls: {calls_line}")
 
     try:
         from .queue_db import get_pending_count
@@ -572,11 +605,12 @@ def cmd_voice_clone(args: argparse.Namespace) -> int:
             print("No custom voices found.", file=sys.stderr)
             return 0
         print(f"\nCustom voices ({len(voices)}):")
-        print("-" * 50)
+        print("-" * 60)
         for name, entry in voices.items():
             desc = entry.get("description", "")
             created = entry.get("created_at", "unknown")[:10]
-            print(f"  {name:<25} {desc}  ({created})")
+            provider = entry.get("provider", "local")
+            print(f"  {name:<25} [{provider:<10}] {desc}  ({created})")
         print()
         return 0
 
@@ -600,8 +634,9 @@ def cmd_voice_clone(args: argparse.Namespace) -> int:
             start_secs=args.start,
             duration_secs=args.duration,
             description=args.description,
+            provider=args.provider,
         )
-        print(f"Voice cloned: {args.name}", file=sys.stderr)
+        print(f"Voice cloned: {args.name} (provider={args.provider})", file=sys.stderr)
         print(f"Audio saved to: {path}", file=sys.stderr)
         return 0
     except Exception as e:
@@ -731,6 +766,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     voice_clone_parser.add_argument(
         "--description", help="Description of the voice"
+    )
+    voice_clone_parser.add_argument(
+        "--provider",
+        choices=["local", "elevenlabs"],
+        default="local",
+        help="Cloning provider (default: local). 'elevenlabs' needs ELEVENLABS_API_KEY.",
     )
     voice_clone_parser.add_argument(
         "--list", action="store_true", help="List custom voices"

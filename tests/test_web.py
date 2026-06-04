@@ -17,6 +17,149 @@ from speeker.web import (
 )
 
 
+class TestInterpretationCuesApi:
+    """CRUD for interpretation cues + token<->notes round-trip."""
+
+    def test_get_includes_builtins_with_tokens(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client = TestClient(app)
+            cues = {c["name"]: c for c in client.get("/api/interpretations/cues").json()["cues"]}
+            assert {"SUCCESS", "ERROR", "INFO", "WARNING"} <= set(cues)
+            # INFO = single Eb4 @ 0.5s -> 2.5x base (0.2s); WARNING = double Eb4 @ 0.4s -> 2x.
+            assert cues["INFO"]["notes"] == "Eb4:2.5"
+            assert cues["WARNING"]["notes"] == "Eb4:2 Eb4:2"
+            assert cues["INFO"]["builtin"] is True
+
+    def test_put_custom_and_get_roundtrip(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client = TestClient(app)
+            r = client.put("/api/interpretations/cues", json={"name": "PING", "notes": "C5 G4:2"})
+            assert r.status_code == 200
+            cues = {c["name"]: c for c in client.get("/api/interpretations/cues").json()["cues"]}
+            assert cues["PING"]["notes"] == "C5 G4:2"
+            assert cues["PING"]["builtin"] is False
+
+    def test_put_rejects_empty_notes(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client = TestClient(app)
+            assert client.put("/api/interpretations/cues",
+                              json={"name": "X", "notes": "not-a-note"}).status_code == 400
+
+    def test_delete_custom_removes_and_builtin_reverts(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client = TestClient(app)
+            client.put("/api/interpretations/cues", json={"name": "PING", "notes": "C5"})
+            d = client.delete("/api/interpretations/cues/PING").json()
+            assert d["removed"] is True and d["reverts_to_builtin"] is False
+            names = {c["name"] for c in client.get("/api/interpretations/cues").json()["cues"]}
+            assert "PING" not in names
+
+            # Override a built-in then reset -> still present (reverts).
+            client.put("/api/interpretations/cues", json={"name": "WARNING", "notes": "Eb4"})
+            d2 = client.delete("/api/interpretations/cues/WARNING").json()
+            assert d2["reverts_to_builtin"] is True
+            cues = {c["name"]: c for c in client.get("/api/interpretations/cues").json()["cues"]}
+            assert cues["WARNING"]["notes"] == "Eb4:2 Eb4:2"  # back to default
+
+
+class TestPronunciationDisabledApi:
+    """Per-row enable state persists via the disabled list."""
+
+    def test_disabled_persists_and_filters_unknown(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            client = TestClient(app)
+            # Default: no disabled entries.
+            assert client.get("/api/pronunciation").json()["disabled"] == []
+
+            r = client.put("/api/pronunciation", json={
+                "overrides": {"compass": "kom pass", "progress": "prah gress"},
+                "disabled": ["compass", "ghost"],  # 'ghost' isn't an override
+            }).json()
+            # Only known words retained in disabled.
+            assert r["disabled"] == ["compass"]
+            assert set(r["overrides"]) == {"compass", "progress"}
+
+            got = client.get("/api/pronunciation").json()
+            assert got["disabled"] == ["compass"]
+
+
+class TestCallsApi:
+    """GET/PUT /api/calls reflect config + monitor state."""
+
+    def test_get_reports_status_and_put_persists(self, tmp_path):
+        import json
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            cfgdir = tmp_path / "config"
+            cfgdir.mkdir(parents=True, exist_ok=True)
+            state = tmp_path / "state.json"
+            (cfgdir / "config.json").write_text(json.dumps({
+                "calls": {"pause_when_active": False, "state_file": str(state)}
+            }))
+            state.write_text(json.dumps({"active": True}))
+
+            client = TestClient(app)
+            g = client.get("/api/calls").json()
+            assert g["status"] == "active"
+            assert g["pause_when_active"] is False
+
+            p = client.put("/api/calls", json={"pause_when_active": True}).json()
+            assert p["pause_when_active"] is True
+
+            # Persisted to config.
+            assert client.get("/api/calls").json()["pause_when_active"] is True
+
+    def test_status_unavailable_without_monitor(self, tmp_path):
+        import json
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            cfgdir = tmp_path / "config"
+            cfgdir.mkdir(parents=True, exist_ok=True)
+            (cfgdir / "config.json").write_text(json.dumps({
+                "calls": {"pause_when_active": False, "state_file": str(tmp_path / "absent.json")}
+            }))
+            client = TestClient(app)
+            assert client.get("/api/calls").json()["status"] == "unavailable"
+
+
+class TestApiEnginesCustomVoices:
+    """The Engine & Voice picker must surface cloned voices."""
+
+    def test_local_clone_under_pocket_tts_and_el_engine(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker import voice_clone
+
+            (tmp_path / "data" / "voices").mkdir(parents=True)
+            voice_clone._save_manifest({
+                "Loc": {"audio_path": "x", "provider": "local",
+                        "description": "local clone", "created_at": ""},
+                "El": {"audio_path": "x", "provider": "elevenlabs", "voice_id": "vid",
+                       "description": "cloud clone", "created_at": ""},
+            })
+
+            client = TestClient(app)
+            engines = {e["name"]: e for e in client.get("/api/engines").json()["engines"]}
+
+            pocket_ids = [v["id"] for v in engines["pocket-tts"]["voices"]]
+            assert "Loc" in pocket_ids
+            assert "El" not in pocket_ids
+
+            assert "elevenlabs" in engines
+            el_ids = [v["id"] for v in engines["elevenlabs"]["voices"]]
+            assert el_ids == ["El"]
+
+    def test_no_elevenlabs_engine_without_el_clones(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker import voice_clone
+
+            (tmp_path / "data" / "voices").mkdir(parents=True)
+            voice_clone._save_manifest({
+                "Loc": {"audio_path": "x", "provider": "local",
+                        "description": "local clone", "created_at": ""},
+            })
+            client = TestClient(app)
+            names = {e["name"] for e in client.get("/api/engines").json()["engines"]}
+            assert "elevenlabs" not in names
+
+
 class TestStripToneTokens:
     """Tests for strip_tone_tokens (display-time elision of $Note tones)."""
 

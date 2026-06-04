@@ -304,6 +304,93 @@ HTML_TEMPLATE = """
             align-items: center;
             margin-left: auto;
         }
+        /* Queue-history cards: uniform height, scrolling body, pinned footer.
+           The card is a flex column; the body flexes to fill and scrolls,
+           the footer sits at the bottom regardless of content length. */
+        .card.history-card {
+            height: 320px;
+        }
+        .card.history-card .card-text {
+            flex: 1 1 auto;
+            min-height: 0;        /* allow the flex child to shrink + scroll */
+            max-height: none;     /* override the default 8em cap */
+        }
+        .card.history-card .card-footer {
+            margin-top: auto;     /* pin to the bottom */
+        }
+        /* Queue color lives in the header band now, not the side stripe.
+           The side keeps only the interpretation-outcome accent. --header-fg
+           is computed per card (black/white) for readable text on any color. */
+        .card.history-card { overflow: hidden; border-left-color: var(--border); }
+        .card.history-card.interp-success { border-left-color: var(--success); }
+        .card.history-card.interp-error   { border-left-color: var(--error); }
+        .card.history-card.interp-other   { border-left-color: var(--warn); }
+        .card.history-card .card-header-row {
+            margin: -18px -18px 0;   /* bleed over the 18px card padding; flex gap spaces the body */
+            padding: 12px 18px;
+            background: var(--queue-color, var(--surface-2));
+            color: var(--header-fg, var(--text-1));
+        }
+        .card.history-card .card-header-row .queue-chip {
+            background: transparent;
+            color: var(--header-fg, var(--text-2));
+            border-color: transparent;
+        }
+        .card.history-card .card-header-row .time-toggle {
+            color: var(--header-fg, var(--text-3));
+        }
+        .card.history-card .card-header-row .time-toggle:hover {
+            background: color-mix(in srgb, var(--header-fg, #000) 18%, transparent);
+            color: var(--header-fg, var(--text-1));
+            border-color: transparent;
+        }
+        /* Markdown-rendered body: normal flow (not pre-wrap), compact spacing. */
+        .card-text.markdown { white-space: normal; }
+        .card-text.markdown > :first-child { margin-top: 0; }
+        .card-text.markdown > :last-child { margin-bottom: 0; }
+        .card-text.markdown p { margin: 0 0 0.6em; }
+        .card-text.markdown h1,
+        .card-text.markdown h2,
+        .card-text.markdown h3,
+        .card-text.markdown h4 { margin: 0.6em 0 0.3em; line-height: 1.25; }
+        .card-text.markdown h1 { font-size: 1.25em; }
+        .card-text.markdown h2 { font-size: 1.15em; }
+        .card-text.markdown h3 { font-size: 1.05em; }
+        .card-text.markdown ul,
+        .card-text.markdown ol { margin: 0 0 0.6em; padding-left: 1.4em; }
+        .card-text.markdown li { margin: 0.15em 0; }
+        .card-text.markdown code {
+            font-family: 'SF Mono', Menlo, Monaco, Consolas, monospace;
+            font-size: 0.88em;
+            background: var(--surface-2);
+            padding: 1px 5px;
+            border-radius: 4px;
+        }
+        .card-text.markdown pre {
+            background: var(--surface-2);
+            padding: 10px 12px;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 0 0 0.6em;
+        }
+        .card-text.markdown pre code { background: none; padding: 0; }
+        .card-text.markdown blockquote {
+            margin: 0 0 0.6em;
+            padding-left: 0.8em;
+            border-left: 3px solid var(--border);
+            color: var(--text-2);
+        }
+        .card-text.markdown a { color: var(--accent); }
+        .card-text.markdown table {
+            border-collapse: collapse;
+            margin: 0 0 0.6em;
+        }
+        .card-text.markdown th,
+        .card-text.markdown td {
+            border: 1px solid var(--border);
+            padding: 3px 8px;
+        }
+        .card-text.markdown img { max-width: 100%; }
         /* Queue chip: monospace code-like pill with the queue's accent
            color as a left border. The full queue name lives in the title=
            attribute so hover reveals it. */
@@ -735,6 +822,28 @@ HTML_TEMPLATE = """
             outline: none;
             border-color: var(--accent);
         }
+        /* iOS-style toggle switch. */
+        .ios-switch {
+            position: relative; display: inline-block;
+            width: 44px; height: 26px; flex: none;
+        }
+        .ios-switch input { opacity: 0; width: 0; height: 0; }
+        .ios-switch .slider {
+            position: absolute; inset: 0; cursor: pointer;
+            background: var(--surface-3); border: 1px solid var(--border);
+            border-radius: 26px; transition: background .18s ease;
+        }
+        .ios-switch .slider::before {
+            content: ""; position: absolute;
+            height: 20px; width: 20px; left: 3px; top: 2px;
+            background: #fff; border-radius: 50%;
+            box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: transform .18s ease;
+        }
+        .ios-switch input:checked + .slider {
+            background: var(--accent); border-color: var(--accent);
+        }
+        .ios-switch input:checked + .slider::before { transform: translateX(18px); }
+        .pron-disabled { opacity: 0.45; }  /* visual cue only; rows stay editable */
         .restart-banner {
             background: var(--accent-soft);
             color: var(--warn);
@@ -1155,8 +1264,11 @@ HTML_TEMPLATE = """
             padding: 11px 14px;
             border-bottom: 1px solid var(--border);
             font-size: 0.92em;
-            vertical-align: top;
+            vertical-align: middle;
             color: var(--text-1);
+            /* Row background tinted with the queue's color (subtle so the
+               default text stays readable); no tint when no color is set. */
+            background: color-mix(in srgb, var(--queue-color, var(--surface-1)) 18%, var(--surface-1));
         }
         /* Per-row queue-color accent on the leading cell. Interpretation
            classes (.row-success / .row-error / .row-other) re-color this
@@ -1386,6 +1498,9 @@ HTML_TEMPLATE = """
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
+    <!-- Markdown rendering for card bodies; DOMPurify sanitizes the output. -->
+    <script src="https://unpkg.com/marked@12/marked.min.js"></script>
+    <script src="https://unpkg.com/dompurify@3/dist/purify.min.js"></script>
 </head>
 <body>
     <div id="root">Loading...</div>
@@ -1393,6 +1508,35 @@ HTML_TEMPLATE = """
 
     <script type="text/babel" data-presets="env,react">
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
+
+// Render Markdown source to sanitized HTML for dangerouslySetInnerHTML.
+// Falls back to escaped plain text if the CDN libs failed to load.
+function renderMarkdown(src) {
+    const text = src || '';
+    try {
+        if (window.marked && window.DOMPurify) {
+            const html = window.marked.parse(text, { breaks: true, gfm: true });
+            return window.DOMPurify.sanitize(html);
+        }
+    } catch (e) { /* fall through to escaped text */ }
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// Pick a readable text color (black or white) for a given background hex,
+// using perceived luminance. Returns '' for unknown input (CSS var falls back).
+function contrastColor(hex) {
+    if (!hex || typeof hex !== 'string') return '';
+    let c = hex.replace('#', '').trim();
+    if (c.length === 3) c = c.split('').map(x => x + x).join('');
+    if (c.length !== 6 || /[^0-9a-fA-F]/.test(c)) return '';
+    const r = parseInt(c.slice(0, 2), 16);
+    const g = parseInt(c.slice(2, 4), 16);
+    const b = parseInt(c.slice(4, 6), 16);
+    const L = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return L > 0.6 ? '#000' : '#fff';
+}
 
 // ----- Top-level App: routes between the History and Settings tabs.
 function App() {
@@ -2087,13 +2231,16 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay, relativeTimes, onToggle
     const interpClass = item.interp_class || '';
     const cls = [
         'card',
+        'history-card',
         isPlaying ? 'playing' : '',
         isSpeaking ? 'speaking' : '',
         interpClass,
     ].filter(Boolean).join(' ');
     const statusClass = item.played ? 'played' : 'pending';
     const statusText = isSpeaking ? 'Speaking' : (item.played ? 'Played' : 'Pending');
-    const cardStyle = item.queue_color ? { '--queue-color': item.queue_color } : {};
+    const cardStyle = item.queue_color
+        ? { '--queue-color': item.queue_color, '--header-fg': contrastColor(item.queue_color) }
+        : {};
     // Prefer played-at for the time pill ("when it was played"); fall
     // back to created-at for items still in flight. The absolute string
     // comes from the server's format_time so the language matches the
@@ -2121,7 +2268,8 @@ function ItemCard({ item, isPlaying, isSpeaking, onPlay, relativeTimes, onToggle
                     title={timeTitle + ' (click to toggle absolute / relative)'}
                 >{timeLabel}</button>
             </div>
-            <div className="card-text" dangerouslySetInnerHTML={{ __html: item.text }} />
+            <div className="card-text markdown"
+                dangerouslySetInnerHTML={{ __html: renderMarkdown(item.raw_text) }} />
             <div className="card-footer">
                 <span className={'status ' + statusClass}>{statusText}</span>
                 <div className="card-footer-actions">
@@ -2272,7 +2420,7 @@ function GenerateView() {
     if (!globalSettings || engines.length === 0) return <div>Loading...</div>;
 
     const charCount = text.length;
-    const charBudget = 5000;
+    const charBudget = 50000;
     const overBudget = charCount > charBudget;
 
     return (
@@ -2471,6 +2619,11 @@ function SettingsView() {
             subtitle: 'Notes played before and after multi-message batches.',
             body: <TonesSection />,
         },
+        interpretations: {
+            title: 'Interpretations',
+            subtitle: 'Tone cues played before a message (SUCCESS, ERROR, INFO, WARNING, custom).',
+            body: <InterpretationsSection />,
+        },
         effects: {
             title: 'Audio effects',
             subtitle: 'Reverb, compression, EQ on TTS speech. Tones are unaffected.',
@@ -2508,6 +2661,7 @@ const SETTINGS_SECTIONS = [
     { id: 'engine',        title: 'Engine & voice' },
     { id: 'pronunciation', title: 'Pronunciation' },
     { id: 'tones',         title: 'Tones' },
+    { id: 'interpretations', title: 'Interpretations' },
     { id: 'effects',       title: 'Effects' },
     { id: 'ssml',          title: 'SSML' },
     { id: 'per-queue',     title: 'Per-queue' },
@@ -2575,12 +2729,32 @@ function EngineSection({ engines, settings, onSave }) {
     const [voice, setVoice] = useState(settings.voice || '');
     const [speed, setSpeed] = useState(settings.speed ?? 1.0);
     const [intro, setIntro] = useState(!!settings.intro_sound);
+    const [pauseOnCall, setPauseOnCall] = useState(false);
+    const [callStatus, setCallStatus] = useState('unavailable');
     useEffect(() => {
         setEngine(settings.engine || 'polly');
         setVoice(settings.voice || '');
         setSpeed(settings.speed ?? 1.0);
         setIntro(!!settings.intro_sound);
     }, [settings]);
+    useEffect(() => {
+        fetch('/api/calls').then(r => r.json()).then(d => {
+            setPauseOnCall(!!d.pause_when_active);
+            setCallStatus(d.status || 'unavailable');
+        }).catch(() => {});
+    }, []);
+    const savePauseOnCall = async (val) => {
+        setPauseOnCall(val);
+        try {
+            const r = await fetch('/api/calls', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pause_when_active: val }),
+            });
+            const d = await r.json();
+            setCallStatus(d.status || 'unavailable');
+        } catch (e) {}
+    };
 
     const engineMeta = useMemo(() => engines.find(e => e.name === engine), [engines, engine]);
     const voices = engineMeta ? engineMeta.voices : [];
@@ -2615,6 +2789,15 @@ function EngineSection({ engines, settings, onSave }) {
                 <input type="checkbox" checked={intro} onChange={e => setIntro(e.target.checked)}
                     style={{ width: 'auto', flex: 'none' }} />
             </div>
+            <div className="field-row">
+                <label>Pause while on a call</label>
+                <input type="checkbox" checked={pauseOnCall}
+                    onChange={e => savePauseOnCall(e.target.checked)}
+                    style={{ width: 'auto', flex: 'none' }} />
+                <span style={{ marginLeft: 8, opacity: 0.7, fontSize: '0.85em' }}>
+                    {callStatus === 'unavailable' ? 'monitor not installed' : callStatus}
+                </span>
+            </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
                 <button
                     className="btn-try"
@@ -2647,14 +2830,20 @@ function EngineSection({ engines, settings, onSave }) {
 // daemon re-reads config.json on every preprocess call, so the optional
 // ``onChange`` prop is intentionally a no-op for this section.
 function PronunciationSection({ onChange }) {
-    const [rows, setRows] = useState([]);   // [{word, replacement}]
+    const [rows, setRows] = useState([]);   // [{word, replacement, enabled}]
     const [status, setStatus] = useState('');
     const [loaded, setLoaded] = useState(false);
 
+    const rowsFrom = (d) => {
+        const disabled = new Set(d.disabled || []);
+        return Object.entries(d.overrides || {}).map(
+            ([word, replacement]) => ({ word, replacement, enabled: !disabled.has(word) })
+        );
+    };
+
     useEffect(() => {
         fetch('/api/pronunciation').then(r => r.json()).then(d => {
-            const entries = Object.entries(d.overrides || {});
-            setRows(entries.map(([word, replacement]) => ({ word, replacement })));
+            setRows(rowsFrom(d));
             setLoaded(true);
         });
     }, []);
@@ -2662,26 +2851,27 @@ function PronunciationSection({ onChange }) {
     const setRow = (i, key, value) => {
         setRows(prev => prev.map((r, j) => j === i ? { ...r, [key]: value } : r));
     };
-    const addRow = () => setRows(prev => [...prev, { word: '', replacement: '' }]);
+    const addRow = () => setRows(prev => [...prev, { word: '', replacement: '', enabled: true }]);
     const removeRow = (i) => setRows(prev => prev.filter((_, j) => j !== i));
 
     const save = async () => {
         setStatus('Saving...');
         const overrides = {};
-        for (const { word, replacement } of rows) {
+        const disabled = [];
+        for (const { word, replacement, enabled } of rows) {
             if (word.trim() && replacement.trim()) {
                 overrides[word.trim()] = replacement.trim();
+                if (enabled === false) disabled.push(word.trim());
             }
         }
         try {
             const resp = await fetch('/api/pronunciation', {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ overrides }),
+                body: JSON.stringify({ overrides, disabled }),
             });
             const data = await resp.json();
-            const persisted = Object.entries(data.overrides || {});
-            setRows(persisted.map(([word, replacement]) => ({ word, replacement })));
+            setRows(rowsFrom(data));
             setStatus(data.message || 'Saved.');
             if (data.restart_required && onChange) onChange();
             setTimeout(() => setStatus(''), 3000);
@@ -2711,7 +2901,8 @@ function PronunciationSection({ onChange }) {
                     <table className="pronunciation-table">
                         <thead>
                             <tr>
-                                <th style={{ width: '38%' }}>Word</th>
+                                <th style={{ width: 56 }}>On</th>
+                                <th style={{ width: '36%' }}>Word</th>
                                 <th>Spoken as</th>
                                 <th style={{ width: 70 }}></th>
                                 <th style={{ width: 90 }}></th>
@@ -2719,7 +2910,14 @@ function PronunciationSection({ onChange }) {
                         </thead>
                         <tbody>
                             {rows.map((row, i) => (
-                                <tr key={i}>
+                                <tr key={i} className={row.enabled === false ? 'pron-disabled' : ''}>
+                                    <td>
+                                        <label className="ios-switch" title="Apply this override">
+                                            <input type="checkbox" checked={row.enabled !== false}
+                                                onChange={e => setRow(i, 'enabled', e.target.checked)} />
+                                            <span className="slider"></span>
+                                        </label>
+                                    </td>
                                     <td><input value={row.word}
                                         placeholder="e.g. compass"
                                         onChange={e => setRow(i, 'word', e.target.value)} /></td>
@@ -2738,7 +2936,7 @@ function PronunciationSection({ onChange }) {
                                 </tr>
                             ))}
                             {rows.length === 0 && (
-                                <tr><td colSpan={4} style={{ color: 'rgba(255,255,255,0.4)', padding: 12 }}>
+                                <tr><td colSpan={5} style={{ color: 'rgba(255,255,255,0.4)', padding: 12 }}>
                                     No overrides yet. Click "Add row" to start.
                                 </td></tr>
                             )}
@@ -2751,6 +2949,110 @@ function PronunciationSection({ onChange }) {
                     </div>
                 </>
             )}
+        </>
+    );
+}
+
+// ----- Interpretation cue editor. Each cue is a named tone sequence played
+// before a message (SUCCESS / ERROR / INFO / WARNING / custom). Notes use the
+// "Eb4 Eb4:2" token notation (the optional :N scales the note's duration).
+// Built-in cues are overridable (Reset reverts); custom cues are removable.
+function InterpretationsSection() {
+    const [cues, setCues] = useState([]);
+    const [status, setStatus] = useState('');
+    const [loaded, setLoaded] = useState(false);
+
+    const load = () => fetch('/api/interpretations/cues').then(r => r.json()).then(d => {
+        setCues((d.cues || []).map(c => ({ ...c })));
+        setLoaded(true);
+    });
+    useEffect(() => { load(); }, []);
+
+    const setField = (i, key, val) =>
+        setCues(prev => prev.map((c, j) => j === i ? { ...c, [key]: val } : c));
+    const addCue = () =>
+        setCues(prev => [...prev, { name: '', notes: 'Eb4 Eb4:2', builtin: false, type: 'notes', isNew: true }]);
+
+    const flash = (msg) => { setStatus(msg); setTimeout(() => setStatus(''), 3000); };
+
+    const saveCue = async (cue) => {
+        if (!cue.name.trim()) { flash('Name required'); return false; }
+        const resp = await fetch('/api/interpretations/cues', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: cue.name.trim(), notes: cue.notes }),
+        });
+        const d = await resp.json();
+        if (!resp.ok) { flash(d.detail || 'Save failed'); return false; }
+        return true;
+    };
+    const onSave = async (cue) => { if (await saveCue(cue)) { flash('Saved.'); load(); } };
+    const onTry = async (cue) => {
+        // Persist current notes, then play for a faithful preview.
+        if (!(await saveCue(cue))) return;
+        await fetch('/api/interpretations/play', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: cue.name.trim() }),
+        });
+    };
+    const onRemove = async (cue) => {
+        if (cue.isNew) { setCues(prev => prev.filter(c => c !== cue)); return; }
+        await fetch('/api/interpretations/cues/' + encodeURIComponent(cue.name), { method: 'DELETE' });
+        flash(cue.builtin ? 'Reverted to default.' : 'Removed.');
+        load();
+    };
+
+    if (!loaded) return <div>Loading...</div>;
+    return (
+        <>
+            <table className="pronunciation-table">
+                <thead>
+                    <tr>
+                        <th style={{ width: '28%' }}>Name</th>
+                        <th>Notes</th>
+                        <th style={{ width: 60 }}></th>
+                        <th style={{ width: 70 }}></th>
+                        <th style={{ width: 90 }}></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {cues.map((cue, i) => (
+                        <tr key={cue.name + ':' + i}>
+                            <td>
+                                <input value={cue.name}
+                                    placeholder="e.g. WARNING"
+                                    disabled={cue.builtin || !cue.isNew}
+                                    onChange={e => setField(i, 'name', e.target.value)} />
+                            </td>
+                            <td>
+                                {cue.type === 'notes'
+                                    ? <input value={cue.notes}
+                                        placeholder="e.g. Eb4 Eb4:2"
+                                        onChange={e => setField(i, 'notes', e.target.value)} />
+                                    : <span style={{ color: 'var(--text-3)' }}>(sound file)</span>}
+                            </td>
+                            <td>
+                                {cue.builtin && <span className="queue-chip" title="Built-in cue">built-in</span>}
+                            </td>
+                            <td>
+                                <button className="btn-try" onClick={() => onTry(cue)}
+                                    disabled={cue.type !== 'notes' || !cue.name.trim()}
+                                    title="Save these notes and play the cue">Try</button>
+                            </td>
+                            <td style={{ display: 'flex', gap: 4 }}>
+                                <button className="btn" onClick={() => onSave(cue)}
+                                    disabled={cue.type !== 'notes'}>Save</button>
+                                <button className="btn subtle" onClick={() => onRemove(cue)}
+                                    title={cue.builtin ? 'Revert to default' : 'Remove'}>
+                                    {cue.builtin ? 'Reset' : 'Remove'}</button>
+                            </td>
+                        </tr>
+                    ))}
+                </tbody>
+            </table>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+                <button className="btn subtle" onClick={addCue}>+ Add cue</button>
+                <span className="save-success">{status}</span>
+            </div>
         </>
     );
 }
@@ -4518,8 +4820,8 @@ async def api_generate(body: GenerateRequest):
     text = (body.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text cannot be empty")
-    if len(text) > 5000:
-        raise HTTPException(status_code=413, detail="text exceeds the 5000 character limit")
+    if len(text) > 50000:
+        raise HTTPException(status_code=413, detail="text exceeds the 50000 character limit")
     if body.engine and body.engine not in _KNOWN_ENGINES:
         raise HTTPException(
             status_code=400,
@@ -4857,41 +5159,77 @@ def _engine_supports_ssml(engine: str) -> bool:
 
 @router.get("/api/engines")
 async def api_engines():
-    """List available TTS engines with their voices and SSML support."""
-    return JSONResponse({
-        "engines": [
-            {
-                "name": "polly",
-                "label": "Amazon Polly (cloud, SSML-capable)",
-                "supports_ssml": True,
-                "default_voice": get_polly_config().get("voice") or "Joanna",
-                "voices": [{"id": k, "label": v} for k, v in POLLY_VOICES.items()],
-                "polly_engine": get_polly_config().get("engine") or "neural",
-            },
-            {
-                "name": "pocket-tts",
-                "label": "pocket-tts (local, no SSML)",
-                "supports_ssml": False,
-                "default_voice": "azelma",
-                "voices": [{"id": k, "label": v} for k, v in POCKET_TTS_VOICES.items()],
-                "polly_engine": None,
-            },
-            {
-                "name": "kokoro",
-                "label": "kokoro (local, no SSML)",
-                "supports_ssml": False,
-                "default_voice": "am_liam",
-                "voices": [{"id": k, "label": v} for k, v in KOKORO_VOICES.items()],
-                "polly_engine": None,
-            },
-        ],
-    })
+    """List available TTS engines with their voices and SSML support.
+
+    Cloned voices are surfaced under the engine that synthesizes them so they
+    are selectable in the picker: local clones under pocket-tts, ElevenLabs
+    clones under the elevenlabs engine.
+    """
+    from .voice_clone import get_custom_voices
+    from .config import get_elevenlabs_config
+
+    customs = get_custom_voices()
+    local_customs = {
+        n: e for n, e in customs.items() if e.get("provider", "local") == "local"
+    }
+    el_customs = {n: e for n, e in customs.items() if e.get("provider") == "elevenlabs"}
+
+    def _clone_label(entry: dict) -> str:
+        return f"{entry.get('description') or 'Cloned voice'} (cloned)"
+
+    pocket_voices = [{"id": k, "label": v} for k, v in POCKET_TTS_VOICES.items()]
+    pocket_voices += [{"id": n, "label": _clone_label(e)} for n, e in local_customs.items()]
+
+    engines = [
+        {
+            "name": "polly",
+            "label": "Amazon Polly (cloud, SSML-capable)",
+            "supports_ssml": True,
+            "default_voice": get_polly_config().get("voice") or "Joanna",
+            "voices": [{"id": k, "label": v} for k, v in POLLY_VOICES.items()],
+            "polly_engine": get_polly_config().get("engine") or "neural",
+        },
+        {
+            "name": "pocket-tts",
+            "label": "pocket-tts (local, no SSML)",
+            "supports_ssml": False,
+            "default_voice": "azelma",
+            "voices": pocket_voices,
+            "polly_engine": None,
+        },
+        {
+            "name": "kokoro",
+            "label": "kokoro (local, no SSML)",
+            "supports_ssml": False,
+            "default_voice": "am_liam",
+            "voices": [{"id": k, "label": v} for k, v in KOKORO_VOICES.items()],
+            "polly_engine": None,
+        },
+    ]
+
+    # Only expose elevenlabs when there are cloned el voices to pick.
+    if el_customs:
+        default_el = get_elevenlabs_config().get("voice") or next(iter(el_customs))
+        engines.append({
+            "name": "elevenlabs",
+            "label": "ElevenLabs (cloud cloning)",
+            "supports_ssml": False,
+            "default_voice": default_el,
+            "voices": [{"id": n, "label": _clone_label(e)} for n, e in el_customs.items()],
+            "polly_engine": None,
+        })
+
+    return JSONResponse({"engines": engines})
 
 
 @router.get("/api/pronunciation")
 async def api_get_pronunciation():
-    """Return current user-supplied pronunciation overrides."""
-    return JSONResponse({"overrides": get_pronunciation_overrides()})
+    """Return user overrides plus the per-word disabled list."""
+    from .config import get_pronunciation_disabled
+    return JSONResponse({
+        "overrides": get_pronunciation_overrides(),
+        "disabled": sorted(get_pronunciation_disabled()),
+    })
 
 
 class PronunciationUpdate(BaseModel):
@@ -4899,9 +5237,11 @@ class PronunciationUpdate(BaseModel):
 
     Each value may be either a single string (applies to every engine) or
     a ``{engine: replacement}`` dict with an optional ``"default"`` key
-    for the fallback.
+    for the fallback. ``disabled`` lists words whose row is toggled off (kept
+    but not applied); only words also present in ``overrides`` are retained.
     """
     overrides: dict[str, str | dict[str, str]]
+    disabled: list[str] = []
 
 
 @router.put("/api/pronunciation")
@@ -4936,11 +5276,20 @@ async def api_put_pronunciation(body: PronunciationUpdate):
             if inner:
                 cleaned[word] = inner
 
+    # Keep only disabled words that still exist as overrides.
+    cleaned_disabled = sorted({
+        w.strip() for w in body.disabled
+        if isinstance(w, str) and w.strip() in cleaned
+    })
+
     cfg = get_config()
-    cfg.setdefault("pronunciation", {})["overrides"] = cleaned
+    pron = cfg.setdefault("pronunciation", {})
+    pron["overrides"] = cleaned
+    pron["disabled"] = cleaned_disabled
     save_config(cfg)
     return JSONResponse({
         "overrides": cleaned,
+        "disabled": cleaned_disabled,
         "restart_required": False,
         "message": "Saved. Takes effect on the next utterance.",
     })
@@ -5409,6 +5758,34 @@ async def api_put_settings(body: SettingsUpdate):
     return JSONResponse(get_settings(body.session))
 
 
+@router.get("/api/calls")
+async def api_get_calls():
+    """Pause-on-call setting + current call status (active|idle|unavailable)."""
+    from .config import get_calls_config
+    from .calls import call_status
+    return JSONResponse({
+        "pause_when_active": bool(get_calls_config().get("pause_when_active")),
+        "status": call_status(),
+    })
+
+
+class CallsUpdate(BaseModel):
+    pause_when_active: bool
+
+
+@router.put("/api/calls")
+async def api_put_calls(body: CallsUpdate):
+    """Persist pause-on-call to config.json. The player reads it live (no restart)."""
+    from .calls import call_status
+    cfg = get_config()
+    cfg.setdefault("calls", {})["pause_when_active"] = bool(body.pause_when_active)
+    save_config(cfg)
+    return JSONResponse({
+        "pause_when_active": bool(body.pause_when_active),
+        "status": call_status(),
+    })
+
+
 @router.get("/api/queues")
 async def api_queues():
     """List queues that have any history, with their per-queue settings."""
@@ -5562,6 +5939,124 @@ async def api_put_tone_rules(body: ToneRulesUpdate):
 async def api_get_interpretations():
     """List known interpretation names (built-in SUCCESS/ERROR plus map keys)."""
     return JSONResponse({"interpretations": interpretation_names()})
+
+
+# ----- Interpretation cue editor (CRUD for the named tone cues).
+#
+# A cue's notes are edited as a space-separated token string ("Eb4 Eb4:2"),
+# where the optional :N is a multiplier of the base note duration
+# (interpretations.DEFAULT_NOTE_SECONDS). This matches the $Note / tone-rules
+# notation used elsewhere. Built-in cues (SUCCESS/ERROR/INFO/WARNING) are
+# overridable via config.interpretations.map; DELETE reverts a built-in to its
+# default and removes a custom entirely.
+
+_CUE_TOKEN_RE = re.compile(r"^([A-Ga-g][b#]?[0-8])(?::([0-9]*\.?[0-9]+))?$")
+
+
+def _cue_notes_to_tokens(indication: dict) -> str:
+    from .interpretations import DEFAULT_NOTE_SECONDS
+    out = []
+    for n in indication.get("notes", []) or []:
+        pitch = n.get("pitch")
+        if not pitch:
+            continue
+        try:
+            secs = float(n.get("seconds", DEFAULT_NOTE_SECONDS))
+        except (TypeError, ValueError):
+            secs = DEFAULT_NOTE_SECONDS
+        mult = round(secs / DEFAULT_NOTE_SECONDS, 2)
+        out.append(pitch if abs(mult - 1.0) < 1e-9 else f"{pitch}:{mult:g}")
+    return " ".join(out)
+
+
+def _tokens_to_cue_notes(s: str) -> list[dict]:
+    from .interpretations import DEFAULT_NOTE_SECONDS
+    notes = []
+    for tok in (s or "").split():
+        m = _CUE_TOKEN_RE.match(tok)
+        if not m:
+            continue
+        mult = float(m.group(2)) if m.group(2) else 1.0
+        notes.append({"pitch": m.group(1), "seconds": round(DEFAULT_NOTE_SECONDS * mult, 3)})
+    return notes
+
+
+@router.get("/api/interpretations/cues")
+async def api_get_interpretation_cues():
+    """List every cue with its notes as an editable token string."""
+    from .interpretations import effective_map, BUILTIN_INTERPRETATIONS
+    m = effective_map()
+    cues = []
+    for name in sorted(m):
+        ind = m[name]
+        is_notes = ind.get("type", "notes") == "notes"
+        cues.append({
+            "name": name,
+            "type": ind.get("type", "notes"),
+            "notes": _cue_notes_to_tokens(ind) if is_notes else "",
+            "builtin": name in BUILTIN_INTERPRETATIONS,
+        })
+    return JSONResponse({"cues": cues})
+
+
+class CueUpdate(BaseModel):
+    name: str
+    notes: str
+
+
+@router.put("/api/interpretations/cues")
+async def api_put_interpretation_cue(body: CueUpdate):
+    """Create or update a notes cue in config.interpretations.map (read live)."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    notes = _tokens_to_cue_notes(body.notes)
+    if not notes:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one valid note is required, e.g. 'Eb4' or 'Eb4 Eb4:2'.",
+        )
+    cfg = get_config()
+    cfg.setdefault("interpretations", {}).setdefault("map", {})[name] = {
+        "type": "notes", "notes": notes,
+    }
+    save_config(cfg)
+    return JSONResponse({
+        "name": name,
+        "notes": _cue_notes_to_tokens({"notes": notes}),
+        "message": "Saved. Takes effect on the next utterance.",
+    })
+
+
+@router.delete("/api/interpretations/cues/{name}")
+async def api_delete_interpretation_cue(name: str):
+    """Remove a cue override. Built-ins revert to default; customs are deleted."""
+    from .interpretations import BUILTIN_INTERPRETATIONS
+    cfg = get_config()
+    cmap = cfg.setdefault("interpretations", {}).setdefault("map", {})
+    removed = cmap.pop(name, None) is not None
+    save_config(cfg)
+    return JSONResponse({
+        "removed": removed,
+        "reverts_to_builtin": name in BUILTIN_INTERPRETATIONS,
+    })
+
+
+class CuePlay(BaseModel):
+    name: str
+
+
+@router.post("/api/interpretations/play")
+async def api_play_interpretation_cue(body: CuePlay):
+    """Preview a cue: enqueue a tone-only item so the daemon plays it."""
+    from .interpretations import is_valid_interpretation
+    from .queue_db import enqueue
+    from .cli import start_player
+    if not is_valid_interpretation(body.name):
+        raise HTTPException(status_code=400, detail=f"Unknown interpretation {body.name!r}")
+    enqueue("", metadata={"interpretation": body.name})
+    start_player()
+    return JSONResponse({"ok": True})
 
 
 @router.get("/api/effects")

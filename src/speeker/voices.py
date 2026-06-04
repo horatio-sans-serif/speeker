@@ -44,11 +44,17 @@ POLLY_VARIANT_DEFAULT_VOICE = {
     "generative": "Ruth",
 }
 
+# ElevenLabs has no built-in catalog here -- it only exposes voices the user
+# has cloned (provider="elevenlabs" entries in the voice manifest) plus any
+# raw voice_id passed through.
+ELEVENLABS_VOICES: dict[str, str] = {}
+
 DEFAULT_ENGINE = "pocket-tts"
 DEFAULT_POCKET_TTS_VOICE = "azelma"
 DEFAULT_KOKORO_VOICE = "am_liam"
 DEFAULT_POLLY_VOICE = "Joanna"
 DEFAULT_POLLY_ENGINE = "neural"  # Polly engine variant
+DEFAULT_ELEVENLABS_VOICE = ""  # no built-in default; resolved from config/manifest
 
 
 def is_custom_voice(name: str) -> bool:
@@ -56,6 +62,17 @@ def is_custom_voice(name: str) -> bool:
     from .voice_clone import get_custom_voice_path
 
     return get_custom_voice_path(name) is not None
+
+
+def _elevenlabs_custom_voices() -> dict[str, str]:
+    """Custom voices owned by the elevenlabs provider, as name -> description."""
+    from .voice_clone import get_custom_voices
+
+    return {
+        name: entry.get("description", "Cloned voice")
+        for name, entry in get_custom_voices().items()
+        if entry.get("provider") == "elevenlabs"
+    }
 
 
 def get_voices(engine: str | None = None) -> dict[str, dict[str, str]]:
@@ -67,6 +84,15 @@ def get_voices(engine: str | None = None) -> dict[str, dict[str, str]]:
         result["kokoro"] = KOKORO_VOICES
     if engine is None or engine == "polly":
         result["polly"] = POLLY_VOICES
+
+    # ElevenLabs has no built-ins; surface the user's cloned el voices so
+    # `speeker voices -e elevenlabs` and the validation error path list them.
+    if engine == "elevenlabs":
+        result["elevenlabs"] = _elevenlabs_custom_voices()
+    elif engine is None:
+        el = _elevenlabs_custom_voices()
+        if el:
+            result["elevenlabs"] = el
 
     # Include custom voices when not filtering to a specific engine,
     # or when explicitly requesting custom voices.
@@ -89,6 +115,10 @@ def get_default_voice(engine: str) -> str:
         return DEFAULT_KOKORO_VOICE
     if engine == "polly":
         return DEFAULT_POLLY_VOICE
+    if engine == "elevenlabs":
+        from .config import get_elevenlabs_config
+
+        return get_elevenlabs_config().get("voice") or DEFAULT_ELEVENLABS_VOICE
     return DEFAULT_POCKET_TTS_VOICE
 
 
@@ -100,6 +130,9 @@ def validate_voice(engine: str, voice: str) -> bool:
         return voice in KOKORO_VOICES
     if engine == "polly":
         # Polly's catalog is large and region-dependent; Polly is the authority.
+        return isinstance(voice, str) and bool(voice.strip())
+    if engine == "elevenlabs":
+        # A cloned voice name or a raw voice_id; ElevenLabs is the authority.
         return isinstance(voice, str) and bool(voice.strip())
     return False
 

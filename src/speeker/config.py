@@ -33,9 +33,30 @@ DEFAULT_CONFIG = {
         "engine": "neural",  # default Polly engine variant
         "voice": "Joanna",   # default Polly VoiceId
     },
+    "elevenlabs": {
+        # Synthesis model. eleven_multilingual_v2 is the broad-quality default;
+        # eleven_turbo_v2_5 / eleven_flash_v2_5 trade fidelity for latency/cost.
+        "model": "eleven_multilingual_v2",
+        # Raw 16-bit mono PCM @ 24kHz -- parsed like Polly's PCM, no decode step.
+        "output_format": "pcm_24000",
+        # Optional default voice (a cloned voice name or a raw ElevenLabs
+        # voice_id). None means -v is required for this engine.
+        "voice": None,
+        # API key fallback. The ELEVENLABS_API_KEY env var takes precedence;
+        # keep this None to avoid storing the secret in config.json.
+        "api_key": None,
+    },
     "ssml": {
         "emulate_for_local": False,  # if True, approximate SSML for local TTS engines
         "acronyms_file": None,       # path to a file of extra spell-out acronyms
+    },
+    "calls": {
+        # Pause the player's queues while a call is active (mic in use),
+        # using the standalone monitor-active-calls daemon. Off by default.
+        # Pending items are held (not dropped) and flush when the call ends.
+        # If the state file is absent (monitor not installed), this is a no-op.
+        "pause_when_active": False,
+        "state_file": "~/.local/monitor-active-calls/state.json",
     },
     "effects": {
         # Active audio-effects preset applied to TTS speech. Per-queue
@@ -96,6 +117,10 @@ DEFAULT_CONFIG = {
         # give deterministic IPA control; this dict is for the plain-text
         # path that every engine shares.
         "overrides": {},
+        # Per-entry disable list: words here are kept (still shown/editable in
+        # the UI) but not applied. Each override row has its own on/off switch,
+        # default on; toggling off adds the word here.
+        "disabled": [],
     },
     "auto_label": {
         # Announce the queue's spoken title before a single bare message after
@@ -231,10 +256,34 @@ def get_polly_config() -> dict:
     return config.get("polly", {})
 
 
+def get_elevenlabs_config() -> dict:
+    """Get ElevenLabs configuration (ELEVENLABS_API_KEY env overrides config)."""
+    import os
+
+    config = get_config()
+    cfg = dict(config.get("elevenlabs", {}))
+    cfg["api_key"] = os.environ.get("ELEVENLABS_API_KEY") or cfg.get("api_key")
+    return cfg
+
+
 def get_ssml_config() -> dict:
     """Get SSML configuration."""
     config = get_config()
     return config.get("ssml", {})
+
+
+def get_calls_config() -> dict:
+    """Get call-detection / pause-on-call configuration.
+
+    ``state_file`` is returned with ``~`` expanded.
+    """
+    import os
+
+    config = get_config()
+    cfg = dict(config.get("calls", {}))
+    state_file = cfg.get("state_file") or "~/.local/monitor-active-calls/state.json"
+    cfg["state_file"] = os.path.expanduser(state_file)
+    return cfg
 
 
 def get_interpretations_config() -> dict:
@@ -271,6 +320,15 @@ def get_tone_rules() -> list[dict]:
     config = get_config()
     rules = config.get("tone_rules", [])
     return rules if isinstance(rules, list) else []
+
+
+def get_pronunciation_disabled() -> set[str]:
+    """Words whose pronunciation override is toggled off (not applied)."""
+    config = get_config()
+    raw = config.get("pronunciation", {}).get("disabled", [])
+    if not isinstance(raw, list):
+        return set()
+    return {w for w in raw if isinstance(w, str) and w.strip()}
 
 
 def get_pronunciation_overrides() -> dict[str, str | dict[str, str]]:

@@ -16,6 +16,7 @@ from speeker.player import (
     play_audio,
     play_interpretation_cue,
     render_interpretation_cue,
+    synthesize_note_cue,
     should_announce_intro,
     build_session_script,
     compute_auto_label_prefix,
@@ -25,6 +26,25 @@ from speeker.player import (
     PAUSE_BETWEEN_MESSAGES,
     PAUSE_BETWEEN_SESSIONS,
 )
+
+
+class TestNoteCueRest:
+    """Repeated identical notes get a separating rest so they read as two tones."""
+
+    def _wav_seconds(self, path):
+        import wave
+        with wave.open(str(path)) as w:
+            return w.getnframes() / w.getframerate()
+
+    def test_repeated_notes_longer_than_distinct(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            same = synthesize_note_cue("rep", [("eb", 4, 0.4), ("eb", 4, 0.4)])
+            diff = synthesize_note_cue("dist", [("eb", 4, 0.4), ("d", 4, 0.4)])
+            assert same is not None and diff is not None
+            same_s = self._wav_seconds(same)
+            diff_s = self._wav_seconds(diff)
+        # The inserted ~0.08s rest makes the repeated-note cue measurably longer.
+        assert same_s > diff_s + 0.05
 
 
 class TestInterpretationCues:
@@ -1353,26 +1373,45 @@ class TestSpeakTextPlayer:
 
         mock_play.assert_called_once()
 
+    @patch("speeker.player.play_audio")
     @patch("speeker.player.play_tone_tokens")
     @patch("speeker.player.extract_tone_tokens")
-    def test_speak_text_with_tones(self, mock_extract, mock_play_tone):
-        """speak_text passes the tone-duration override through to
-        play_tone_tokens. None (the default) means "use play_tone_tokens'
-        own default" -- the 0.8s used for $Note prefix tones before TTS.
+    def test_speak_text_leading_tone_after_generation(self, mock_extract, mock_play_tone, mock_play_audio, tmp_path):
+        """Generation happens first, then the leading tone plays immediately
+        before the speech (passing the tone-duration override through). The
+        tone must come AFTER generate_tts so a slow engine leaves no gap."""
+        from speeker.player import speak_text as player_speak_text
 
-        TTS now raises TTSError on failure; the leading tone must STILL
-        have played (it was synthesized in the parallel thread before
-        the error was checked)."""
+        mock_extract.return_value = (["C4", "E4"], "Hello", [])
+        audio = tmp_path / "a.wav"
+        audio.write_bytes(b"x")
+
+        order = []
+        with patch("speeker.player.generate_tts") as mock_gen:
+            mock_gen.side_effect = lambda *a, **k: order.append("gen") or audio
+            mock_play_tone.side_effect = lambda *a, **k: order.append("tone")
+            mock_play_audio.side_effect = lambda *a, **k: order.append("play")
+            player_speak_text("$C4 $E4 Hello", save_path=audio, verbose=False)
+
+        assert order == ["gen", "tone", "play"]
+        mock_play_tone.assert_called_once_with(["C4", "E4"], False, duration=None)
+
+    @patch("speeker.player.play_audio")
+    @patch("speeker.player.play_tone_tokens")
+    @patch("speeker.player.extract_tone_tokens")
+    def test_speak_text_no_tone_on_generation_failure(self, mock_extract, mock_play_tone, mock_play_audio):
+        """On TTS failure the leading tone must NOT play (generate-first):
+        a failed item produces no orphan tone."""
         from speeker.player import speak_text as player_speak_text, TTSError
 
         mock_extract.return_value = (["C4", "E4"], "Hello", [])
-
         with patch("speeker.player.generate_tts") as mock_gen:
             mock_gen.side_effect = TTSError("boom", engine="polly", voice="Joanna")
             with pytest.raises(TTSError):
                 player_speak_text("$C4 $E4 Hello", verbose=False)
 
-        mock_play_tone.assert_called_once_with(["C4", "E4"], False, duration=None)
+        mock_play_tone.assert_not_called()
+        mock_play_audio.assert_not_called()
 
     @patch("speeker.player.play_tone_tokens")
     @patch("speeker.player.extract_tone_tokens")

@@ -92,6 +92,27 @@ class TestManifest:
         assert voice_clone.get_custom_voices() == {}
         assert not voice_subdir.exists()
 
+    def test_get_custom_voice_path_falls_back_to_canonical(self, voices_dir, sample_wav):
+        # Stored audio_path is stale (data dir moved), but reference.wav exists
+        # at the canonical current location. Resolution must still find it.
+        canonical_dir = voices_dir / voice_clone._safe_filename("Moved Voice")
+        canonical_dir.mkdir()
+        canonical_ref = canonical_dir / "reference.wav"
+        import shutil
+        shutil.copy2(sample_wav, canonical_ref)
+
+        voice_clone._save_manifest({
+            "Moved Voice": {
+                "voice_dir": "/old/gone/moved_voice",
+                "audio_path": "/old/gone/moved_voice/reference.wav",
+                "provider": "local",
+                "description": "t",
+                "created_at": "",
+            }
+        })
+
+        assert voice_clone.get_custom_voice_path("Moved Voice") == canonical_ref
+
     def test_get_custom_voice_path_returns_path(self, voices_dir, sample_wav):
         audio_path = voices_dir / "my_voice.wav"
         import shutil
@@ -269,3 +290,104 @@ class TestVoicesIntegration:
         assert "custom" in voices
         assert "V" in voices["custom"]
         assert voices["custom"]["V"] == "desc"
+
+
+class TestProviders:
+    """Provider tracking on manifest entries."""
+
+    def test_provider_defaults_to_local_for_legacy_entry(self, voices_dir):
+        # Entry written before providers existed (no "provider" key).
+        voice_clone._save_manifest({
+            "Old": {"audio_path": "x", "description": "d", "created_at": ""},
+        })
+        assert voice_clone.get_custom_voice_provider("Old") == "local"
+
+    def test_provider_unknown_voice_returns_none(self, voices_dir):
+        assert voice_clone.get_custom_voice_provider("nope") is None
+
+    def test_get_elevenlabs_voice_id(self, voices_dir):
+        voice_clone._save_manifest({
+            "El": {
+                "audio_path": "x", "provider": "elevenlabs",
+                "voice_id": "vid_9", "description": "d", "created_at": "",
+            },
+            "Loc": {
+                "audio_path": "x", "provider": "local",
+                "description": "d", "created_at": "",
+            },
+        })
+        assert voice_clone.get_elevenlabs_voice_id("El") == "vid_9"
+        assert voice_clone.get_elevenlabs_voice_id("Loc") is None
+        assert voice_clone.get_elevenlabs_voice_id("missing") is None
+
+    def test_elevenlabs_voices_surface_under_engine(self, voices_dir):
+        from speeker.voices import get_voices
+
+        voice_clone._save_manifest({
+            "El": {
+                "audio_path": "x", "provider": "elevenlabs",
+                "voice_id": "vid", "description": "cloud voice", "created_at": "",
+            },
+        })
+        assert get_voices("elevenlabs")["elevenlabs"]["El"] == "cloud voice"
+
+    def test_clone_invalid_provider_rejected(self, voices_dir, sample_wav):
+        with pytest.raises(ValueError, match="Unknown provider"):
+            voice_clone.clone_voice("X", sources=[str(sample_wav)], provider="bogus")
+
+    def test_delete_elevenlabs_calls_server_delete(self, voices_dir, monkeypatch):
+        from speeker import elevenlabs_api
+
+        voice_subdir = voices_dir / "el"
+        voice_subdir.mkdir()
+        voice_clone._save_manifest({
+            "El": {
+                "voice_dir": str(voice_subdir),
+                "audio_path": str(voice_subdir / "reference.wav"),
+                "provider": "elevenlabs", "voice_id": "vid_42",
+                "description": "d", "created_at": "",
+            },
+        })
+
+        deleted = {}
+        monkeypatch.setattr(
+            elevenlabs_api, "delete_voice", lambda vid: deleted.setdefault("vid", vid)
+        )
+
+        assert voice_clone.delete_custom_voice("El") is True
+        assert deleted["vid"] == "vid_42"
+        assert voice_clone.get_custom_voices() == {}
+
+
+class TestCloneElevenLabs:
+    """clone_voice(provider="elevenlabs") uploads and records voice_id (ffmpeg)."""
+
+    @pytest.fixture(autouse=True)
+    def _check_ffmpeg(self):
+        import shutil
+        if not shutil.which("ffmpeg"):
+            pytest.skip("ffmpeg not installed")
+
+    def test_clone_elevenlabs_records_voice_id(self, voices_dir, sample_wav, monkeypatch):
+        from speeker import elevenlabs_api
+
+        calls = {}
+
+        def fake_create(name, description, files):
+            calls["name"] = name
+            calls["files"] = list(files)
+            return "vid_created"
+
+        monkeypatch.setattr(elevenlabs_api, "create_ivc_voice", fake_create)
+
+        voice_clone.clone_voice(
+            name="Cloud", sources=[str(sample_wav)],
+            start_secs=0, duration_secs=2, provider="elevenlabs",
+        )
+
+        entry = voice_clone.get_custom_voices()["Cloud"]
+        assert entry["provider"] == "elevenlabs"
+        assert entry["voice_id"] == "vid_created"
+        assert voice_clone.get_elevenlabs_voice_id("Cloud") == "vid_created"
+        assert calls["name"] == "Cloud"
+        assert len(calls["files"]) == 1

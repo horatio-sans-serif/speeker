@@ -15,7 +15,44 @@ from speeker.cli import (
     queue_for_playback,
     speak_text,
     SENTENCE_END_PATTERN,
+    _resolve_engine,
 )
+
+
+class TestResolveEngine:
+    """Tests for engine auto-selection from a voice's provider."""
+
+    def test_explicit_engine_wins(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            args = argparse.Namespace(engine="polly", voice="anything")
+            assert _resolve_engine(args) == "polly"
+
+    def test_no_voice_uses_default(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            args = argparse.Namespace(engine=None, voice=None)
+            assert _resolve_engine(args) == "pocket-tts"
+
+    def test_local_custom_voice_selects_pocket_tts(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker import voice_clone
+            (tmp_path / "data" / "voices").mkdir(parents=True)
+            voice_clone._save_manifest({
+                "Loc": {"audio_path": "x", "provider": "local",
+                        "description": "d", "created_at": ""},
+            })
+            args = argparse.Namespace(engine=None, voice="Loc")
+            assert _resolve_engine(args) == "pocket-tts"
+
+    def test_elevenlabs_custom_voice_selects_elevenlabs(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker import voice_clone
+            (tmp_path / "data" / "voices").mkdir(parents=True)
+            voice_clone._save_manifest({
+                "El": {"audio_path": "x", "provider": "elevenlabs", "voice_id": "v",
+                       "description": "d", "created_at": ""},
+            })
+            args = argparse.Namespace(engine=None, voice="El")
+            assert _resolve_engine(args) == "elevenlabs"
 
 
 class TestGetQueueFile:

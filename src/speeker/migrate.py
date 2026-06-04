@@ -67,6 +67,53 @@ def _migrate_data() -> None:
 
     # voices/  (was under var/voices in voice_clone.py)
     _move(_LEGACY_BASE / "var" / "voices", paths.voices_dir())
+    _rewrite_voice_manifest_paths()
+
+
+def _rewrite_voice_manifest_paths() -> None:
+    """Rewrite stale absolute paths in the voices manifest to the new location.
+
+    Moving the voices directory leaves each entry's ``voice_dir``/``audio_path``
+    pointing at the old location. Without this, ``get_custom_voice_path`` can't
+    find the reference WAV and synthesis silently falls back to the default
+    voice. Only entries whose stored path is missing but whose canonical
+    location exists are rewritten.
+    """
+    import json
+
+    manifest_path = paths.voices_manifest()
+    if not manifest_path.exists():
+        return
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return
+
+    voices_root = paths.voices_dir()
+    changed = False
+    for name, entry in manifest.items():
+        audio_path = Path(entry.get("audio_path", ""))
+        if audio_path.exists():
+            continue
+        # Canonical location is voices_root/<old-dir-basename>/reference.wav.
+        # Use the stored voice_dir basename to find the moved directory.
+        old_dir = entry.get("voice_dir", "")
+        basename = Path(old_dir).name if old_dir else None
+        if not basename:
+            continue
+        new_dir = voices_root / basename
+        new_ref = new_dir / "reference.wav"
+        if new_ref.exists():
+            entry["voice_dir"] = str(new_dir)
+            entry["audio_path"] = str(new_ref)
+            changed = True
+
+    if changed:
+        try:
+            manifest_path.write_text(json.dumps(manifest, indent=2))
+            log.info("Rewrote stale voice manifest paths after migration")
+        except OSError:
+            log.warning("Could not rewrite voice manifest paths", exc_info=True)
 
 
 def _migrate_cache() -> None:

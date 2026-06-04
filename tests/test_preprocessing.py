@@ -173,6 +173,26 @@ def test_pronunciation_overrides_basic():
     assert "progress" not in result.lower().replace("prah gress", "")
 
 
+def test_pronunciation_override_skipped_when_row_disabled():
+    """A word listed in pronunciation.disabled is not applied; other rows still
+    apply."""
+    from unittest.mock import patch
+    from speeker import preprocessing
+
+    preprocessing._cached_overrides.cache_clear()
+    with patch(
+        "speeker.preprocessing.get_pronunciation_overrides",
+        create=True,
+        return_value={"compass": "kom pass", "progress": "prah gress"},
+    ), patch("speeker.config.get_pronunciation_disabled", return_value={"compass"}):
+        result = preprocess_for_tts("the compass shows progress north")
+    preprocessing._cached_overrides.cache_clear()
+
+    assert "kom pass" not in result            # disabled row not applied
+    assert "compass" in result.lower()
+    assert "prah gress" in result              # enabled row still applied
+
+
 def test_pronunciation_overrides_case_insensitive():
     """Matches regardless of input case but the replacement is literal."""
     from unittest.mock import patch

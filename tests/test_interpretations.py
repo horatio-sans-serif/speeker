@@ -35,6 +35,21 @@ class TestBuiltins:
             spec = notes_to_spec(resolve_interpretation("ERROR"))
         assert spec == [("eb", 4, 0.3), ("d", 4, 0.2), ("bb", 2, 0.2), ("bb", 2, 0.2)]
 
+    def test_info_is_single_eb4(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            ind = resolve_interpretation("INFO")
+            names = interpretation_names()
+        assert "INFO" in names
+        assert ind["type"] == "notes"
+        assert [n["pitch"] for n in ind["notes"]] == ["Eb4"]
+
+    def test_warning_is_double_eb4(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            ind = resolve_interpretation("WARNING")
+            names = interpretation_names()
+        assert "WARNING" in names
+        assert [n["pitch"] for n in ind["notes"]] == ["Eb4", "Eb4"]
+
 
 class TestResolve:
     def test_unknown_returns_none(self, tmp_path):
