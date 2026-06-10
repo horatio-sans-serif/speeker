@@ -18,6 +18,10 @@ DEFAULT_CONFIG = {
         "model": None,  # Model name (default per backend if None)
     },
     "player": {
+        # Global on/off switch (`speeker on` / `speeker off`). When False the
+        # daemon stays silent and drops pending items (drains) so nothing
+        # floods when re-enabled. Read live, so toggling takes effect at once.
+        "enabled": True,
         "model_idle_timeout_minutes": 0,  # 0 = never unload
         # Max times the daemon will retry an utterance whose TTS engine
         # raised an exception before giving up. Failures within the cap
@@ -57,6 +61,16 @@ DEFAULT_CONFIG = {
         # If the state file is absent (monitor not installed), this is a no-op.
         "pause_when_active": False,
         "state_file": "~/.local/monitor-active-calls/state.json",
+    },
+    "focus": {
+        # Pause the player while a macOS Focus is active (e.g. Reduce
+        # Interruptions, Do Not Disturb). Off by default. Pending items are
+        # held and flush when the Focus turns off -- same as pause-on-call.
+        # ``modes`` restricts to specific Focus mode identifiers by
+        # case-insensitive substring (e.g. "reduce-interruptions" matches
+        # "com.apple.focus.reduce-interruptions"); empty = any active Focus.
+        "pause_when_active": False,
+        "modes": [],
     },
     "effects": {
         # Active audio-effects preset applied to TTS speech. Per-queue
@@ -159,6 +173,22 @@ DEFAULT_CONFIG = {
                     {"pitch": "D4", "seconds": 0.2},
                     {"pitch": "Bb2", "seconds": 0.2},
                     {"pitch": "Bb2", "seconds": 0.2},
+                ],
+            },
+            "FAILURE": {
+                "type": "notes",
+                "notes": [
+                    {"pitch": "Eb4", "seconds": 0.3},
+                    {"pitch": "D4", "seconds": 0.2},
+                    {"pitch": "Bb2", "seconds": 0.2},
+                    {"pitch": "Bb2", "seconds": 0.2},
+                ],
+            },
+            "USER_PROMPT": {
+                "type": "notes",
+                "notes": [
+                    {"pitch": "Bb3", "seconds": 0.18},
+                    {"pitch": "Eb4", "seconds": 0.5},
                 ],
             },
         },
@@ -264,6 +294,12 @@ def get_elevenlabs_config() -> dict:
     cfg = dict(config.get("elevenlabs", {}))
     cfg["api_key"] = os.environ.get("ELEVENLABS_API_KEY") or cfg.get("api_key")
     return cfg
+
+
+def get_focus_config() -> dict:
+    """Get macOS Focus pause configuration."""
+    config = get_config()
+    return config.get("focus", {})
 
 
 def get_ssml_config() -> dict:

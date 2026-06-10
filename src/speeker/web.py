@@ -1820,7 +1820,7 @@ function HistoryView() {
                     />
                 </div>
                 <div className="sidebar-section">
-                    <h3>Projects</h3>
+                    <h3>Queues</h3>
                     <ProjectPicker
                         projects={queueOptions}
                         selected={selectedQueues}
@@ -1895,8 +1895,8 @@ function HistoryView() {
 // Set of currently-selected names.
 function ProjectPicker({
     projects, selected, onToggle,
-    placeholder = 'Filter projects...',
-    emptyLabel = 'No projects match',
+    placeholder = 'Filter queues...',
+    emptyLabel = 'No queues match',
 }) {
     const [text, setText] = useState('');
     const filtered = useMemo(() => {
@@ -2144,7 +2144,7 @@ function HistoryTable({ items, speakingId, playingId, onPlay, relativeTimes, onT
             <thead>
                 <tr>
                     <th>Text</th>
-                    <th style={{ width: 130 }}>Project</th>
+                    <th style={{ width: 130 }}>Queue</th>
                     <th
                         className="col-date"
                         style={{ width: 130, cursor: 'pointer', userSelect: 'none' }}
@@ -2709,7 +2709,7 @@ function SettingsView() {
         },
         'per-queue': {
             title: 'Per-queue overrides',
-            subtitle: 'Engine and voice overrides per project.',
+            subtitle: 'Engine and voice overrides per queue.',
             body: <PerQueueSection engines={engines} />,
         },
     };
@@ -2804,6 +2804,8 @@ function EngineSection({ engines, settings, onSave }) {
     const [intro, setIntro] = useState(!!settings.intro_sound);
     const [pauseOnCall, setPauseOnCall] = useState(false);
     const [callStatus, setCallStatus] = useState('unavailable');
+    const [pauseOnFocus, setPauseOnFocus] = useState(false);
+    const [focusStatus, setFocusStatus] = useState('unavailable');
     useEffect(() => {
         setEngine(settings.engine || 'polly');
         setVoice(settings.voice || '');
@@ -2814,6 +2816,10 @@ function EngineSection({ engines, settings, onSave }) {
         fetch('/api/calls').then(r => r.json()).then(d => {
             setPauseOnCall(!!d.pause_when_active);
             setCallStatus(d.status || 'unavailable');
+        }).catch(() => {});
+        fetch('/api/focus').then(r => r.json()).then(d => {
+            setPauseOnFocus(!!d.pause_when_active);
+            setFocusStatus(d.status || 'unavailable');
         }).catch(() => {});
     }, []);
     const savePauseOnCall = async (val) => {
@@ -2826,6 +2832,18 @@ function EngineSection({ engines, settings, onSave }) {
             });
             const d = await r.json();
             setCallStatus(d.status || 'unavailable');
+        } catch (e) {}
+    };
+    const savePauseOnFocus = async (val) => {
+        setPauseOnFocus(val);
+        try {
+            const r = await fetch('/api/focus', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pause_when_active: val }),
+            });
+            const d = await r.json();
+            setFocusStatus(d.status || 'unavailable');
         } catch (e) {}
     };
 
@@ -2869,6 +2887,15 @@ function EngineSection({ engines, settings, onSave }) {
                     style={{ width: 'auto', flex: 'none' }} />
                 <span style={{ marginLeft: 8, opacity: 0.7, fontSize: '0.85em' }}>
                     {callStatus === 'unavailable' ? 'monitor not installed' : callStatus}
+                </span>
+            </div>
+            <div className="field-row">
+                <label>Pause during a Focus</label>
+                <input type="checkbox" checked={pauseOnFocus}
+                    onChange={e => savePauseOnFocus(e.target.checked)}
+                    style={{ width: 'auto', flex: 'none' }} />
+                <span style={{ marginLeft: 8, opacity: 0.7, fontSize: '0.85em' }}>
+                    {focusStatus === 'unavailable' ? 'macOS only' : focusStatus}
                 </span>
             </div>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
@@ -4403,7 +4430,7 @@ function PerQueueSection({ engines }) {
                     positioning because we're inside a Section card. */}
                 <aside className="sidebar sidebar-inset">
                     <h3 style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <span>Projects</span>
+                        <span>Queues</span>
                         {selectedQueues.size > 0 && (
                             <button
                                 onClick={() => setSelectedQueues(new Set())}
@@ -4465,7 +4492,7 @@ function PerQueueSection({ engines }) {
                         </span>
                     </div>
                     {filteredSorted.length === 0
-                        ? <div className="no-results">No projects match the filter.</div>
+                        ? <div className="no-results">No queues match the filter.</div>
                         : viewMode === 'cards'
                             ? <PerQueueCards
                                 queues={filteredSorted}
@@ -5856,6 +5883,34 @@ async def api_put_calls(body: CallsUpdate):
     return JSONResponse({
         "pause_when_active": bool(body.pause_when_active),
         "status": call_status(),
+    })
+
+
+@router.get("/api/focus")
+async def api_get_focus():
+    """Pause-on-Focus setting + current macOS Focus status (active|idle|unavailable)."""
+    from .config import get_focus_config
+    from .focus import focus_status
+    return JSONResponse({
+        "pause_when_active": bool(get_focus_config().get("pause_when_active")),
+        "status": focus_status(),
+    })
+
+
+class FocusUpdate(BaseModel):
+    pause_when_active: bool
+
+
+@router.put("/api/focus")
+async def api_put_focus(body: FocusUpdate):
+    """Persist pause-on-Focus to config.json. The player reads it live (no restart)."""
+    from .focus import focus_status
+    cfg = get_config()
+    cfg.setdefault("focus", {})["pause_when_active"] = bool(body.pause_when_active)
+    save_config(cfg)
+    return JSONResponse({
+        "pause_when_active": bool(body.pause_when_active),
+        "status": focus_status(),
     })
 
 

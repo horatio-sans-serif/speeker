@@ -1280,22 +1280,43 @@ def run_daemon(verbose: bool = False) -> None:
 
     last_activity = time.time()
     model_loaded = idle_timeout == 0
-    paused_for_call = False
+    paused_reason: str | None = None
+    muted = False
 
     try:
         while True:
-            # Hold the queue while a call is active (mic in use). Pending items
-            # are left untouched and flush automatically when the call ends.
-            from .calls import should_pause_for_call
-            if should_pause_for_call():
-                if not paused_for_call:
-                    paused_for_call = True
-                    print("[INFO] Call active -- pausing queue", file=sys.stderr, flush=True)
+            # Global off switch (`speeker off`). Stay silent and DRAIN pending
+            # items (mark played, no audio) so nothing floods on re-enable.
+            if not get_player_config().get("enabled", True):
+                if not muted:
+                    muted = True
+                    print("[INFO] Speeker is OFF -- staying silent", file=sys.stderr, flush=True)
+                _drain_pending()
                 time.sleep(POLL_INTERVAL)
                 continue
-            if paused_for_call:
-                paused_for_call = False
-                print("[INFO] Call ended -- resuming queue", file=sys.stderr, flush=True)
+            if muted:
+                muted = False
+                print("[INFO] Speeker is ON", file=sys.stderr, flush=True)
+
+            # Hold the queue while a call is active (mic in use) or a macOS
+            # Focus is on. Pending items are left untouched and flush when the
+            # condition clears.
+            from .calls import should_pause_for_call
+            from .focus import should_pause_for_focus
+            reason = (
+                "Call" if should_pause_for_call()
+                else "Focus" if should_pause_for_focus()
+                else None
+            )
+            if reason:
+                if paused_reason != reason:
+                    paused_reason = reason
+                    print(f"[INFO] {reason} active -- pausing queue", file=sys.stderr, flush=True)
+                time.sleep(POLL_INTERVAL)
+                continue
+            if paused_reason:
+                print(f"[INFO] {paused_reason} ended -- resuming queue", file=sys.stderr, flush=True)
+                paused_reason = None
 
             pending = get_pending_count()
 
@@ -1315,6 +1336,17 @@ def run_daemon(verbose: bool = False) -> None:
             time.sleep(POLL_INTERVAL)
     finally:
         release_lock(lock_path)
+
+
+def _drain_pending() -> None:
+    """Mark all pending items played without speaking (used while OFF)."""
+    from .queue_db import get_sessions_with_pending, get_pending_for_session, mark_played
+    try:
+        for sid in get_sessions_with_pending():
+            for item in get_pending_for_session(sid):
+                mark_played(item["id"])
+    except Exception:
+        pass
 
 
 def run_once(verbose: bool = False) -> None:

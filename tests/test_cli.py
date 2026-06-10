@@ -19,6 +19,20 @@ from speeker.cli import (
 )
 
 
+class TestOnOffSwitch:
+    """`speeker on` / `speeker off` persist the global enable flag."""
+
+    def test_set_enabled_persists(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker.cli import _set_enabled
+            from speeker.config import get_player_config
+            assert get_player_config().get("enabled", True) is True  # default on
+            _set_enabled(False)
+            assert get_player_config().get("enabled", True) is False
+            _set_enabled(True)
+            assert get_player_config().get("enabled", True) is True
+
+
 class TestResolveEngine:
     """Tests for engine auto-selection from a voice's provider."""
 

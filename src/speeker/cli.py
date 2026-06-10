@@ -509,6 +509,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     """Handle the status command."""
     audio = _audio_dir()
 
+    from .config import get_player_config
+    enabled = get_player_config().get("enabled", True)
+    print(f"Speeker: {'ON' if enabled else 'OFF'}")
     print(f"Data directory: {data_dir()}")
     print(f"Player running: {'yes' if is_player_running() else 'no'}")
 
@@ -523,6 +526,19 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         calls_line = "idle"
     print(f"Calls: {calls_line}")
+
+    from .config import get_focus_config
+    from .focus import focus_status, active_focus_modes
+    fstatus = focus_status()
+    fcfg = get_focus_config()
+    if fstatus == "unavailable":
+        focus_line = "unavailable"
+    elif fstatus == "active":
+        mode = (active_focus_modes() or [""])[0].rsplit(".", 1)[-1] or "on"
+        focus_line = f"{mode} (pausing)" if fcfg.get("pause_when_active") else mode
+    else:
+        focus_line = "idle"
+    print(f"Focus: {focus_line}")
 
     try:
         from .queue_db import get_pending_count
@@ -544,6 +560,29 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"Audio files: {total_files}")
     print(f"Total size: {total_size / (1024 * 1024):.1f} MB")
 
+    return 0
+
+
+def _set_enabled(enabled: bool) -> None:
+    """Persist the global on/off switch. The daemon reads it live."""
+    from .config import get_config, save_config
+    cfg = get_config()
+    cfg.setdefault("player", {})["enabled"] = enabled
+    save_config(cfg)
+
+
+def cmd_on(args: argparse.Namespace) -> int:
+    """Enable speeker and make sure the player is running."""
+    _set_enabled(True)
+    start_player()
+    print("Speeker is ON.", file=sys.stderr)
+    return 0
+
+
+def cmd_off(args: argparse.Namespace) -> int:
+    """Disable speeker: stay silent and drop queued messages until 'speeker on'."""
+    _set_enabled(False)
+    print("Speeker is OFF. Messages are dropped until 'speeker on'.", file=sys.stderr)
     return 0
 
 
@@ -721,6 +760,12 @@ def build_parser() -> argparse.ArgumentParser:
     # status command
     status_parser = subparsers.add_parser("status", help="Show speeker status")
     status_parser.set_defaults(func=cmd_status)
+
+    # on / off: global enable-disable switch
+    on_parser = subparsers.add_parser("on", help="Enable speeker (resume speaking)")
+    on_parser.set_defaults(func=cmd_on)
+    off_parser = subparsers.add_parser("off", help="Disable speeker (stay silent, drop messages)")
+    off_parser.set_defaults(func=cmd_off)
 
     # voice-prefs command
     voice_prefs_parser = subparsers.add_parser(

@@ -28,6 +28,19 @@ from speeker.player import (
 )
 
 
+class TestOnOffDrain:
+    """`speeker off` drains pending items silently."""
+
+    def test_drain_marks_pending_played(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            from speeker.queue_db import enqueue, get_pending_count
+            from speeker.player import _drain_pending
+            enqueue("one"); enqueue("two")
+            assert get_pending_count() == 2
+            _drain_pending()
+            assert get_pending_count() == 0
+
+
 class TestNoteCueRest:
     """Repeated identical notes get a separating rest so they read as two tones."""
 
@@ -1570,7 +1583,8 @@ class TestRunDaemon:
 
         mock_sleep.side_effect = sleep_side_effect
 
-        with patch("speeker.player.time.time", side_effect=fake_time):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}), \
+                patch("speeker.player.time.time", side_effect=fake_time):
             try:
                 run_daemon(verbose=False)
             except KeyboardInterrupt:

@@ -31,14 +31,27 @@ def get_db_path() -> Path:
 
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
-    """Get a thread-local database connection with proper locking."""
-    if not hasattr(_local, "conn") or _local.conn is None:
-        db_path = get_db_path()
+    """Get a thread-local database connection with proper locking.
+
+    Cached per thread. If the resolved DB path changes (e.g. SPEEKER_DIR is
+    repointed between tests), the cached connection is closed and reopened so
+    it always targets the current path. In normal operation the path is
+    constant, so the connection is opened once and reused as before.
+    """
+    current = get_db_path()
+    cached = getattr(_local, "conn", None)
+    if cached is None or getattr(_local, "db_path", None) != current:
+        if cached is not None:
+            try:
+                cached.close()
+            except Exception:
+                pass
         _local.conn = sqlite3.connect(
-            str(db_path),
+            str(current),
             check_same_thread=False,
             timeout=30.0,  # Wait up to 30s for locks
         )
+        _local.db_path = current
         _local.conn.row_factory = sqlite3.Row
         _local.conn.execute("PRAGMA journal_mode=WAL")  # Better concurrency
         _init_db(_local.conn)
