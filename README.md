@@ -164,10 +164,13 @@ Note format: `$[A-G][b/#]?[0-8]` (e.g., `$C4`, `$Eb3`, `$F#5`)
 An _interpretation_ tags an utterance with an outcome — `SUCCESS`, `ERROR`, or
 any custom name — and plays a short cue before the speech. The cue is either a
 sequence of notes or a sound file, configured in the `interpretations` map.
-Two are built in:
+These are built in:
 
 - `SUCCESS` — a quick Eb3 stepping up to a ringing G#3.
-- `ERROR` — Eb4, D4, then a doubled low Bb2.
+- `ERROR` / `FAILURE` — Eb4, D4, then a doubled low Bb2 ("something went wrong").
+- `USER_PROMPT` — a rising Bb3→Eb4 "ding-dong?" that reads as a question; use it
+  when the turn paused to ask the listener something.
+- `INFO` — a single Eb4 chime. `WARNING` — a doubled Eb4 attention signal.
 
 ```bash
 # CLI
@@ -185,6 +188,17 @@ Claude can signal how a task turned out. Unknown names are rejected with the
 list of valid interpretations. The cue plays, finishes, pauses
 (`pause_after_seconds`), then the utterance speaks. Cues apply only when
 queued for playback (not with the CLI's `--stdout`/`--no-play`).
+
+### Auto-assessment (`/summarize` with `assess`)
+
+`POST /summarize` accepts `"assess": true`. Instead of just summarizing, speeker
+classifies the turn — `SUCCESS`, `FAILURE`, `USER_PROMPT`, or neutral — in a
+single LLM call, attaches the matching cue, and styles the summary to the
+outcome (a `USER_PROMPT` is phrased as a question, e.g. "I have a question
+about whether to delete the old records."). A neutral turn gets no cue. The
+chosen interpretation is returned in the `interpretation` field. The Claude Code
+Stop hook (`summarize-response.py`) uses this so each finished turn is announced
+with how it went. Falls back to a keyword heuristic when no LLM is configured.
 
 ## Configuration
 
@@ -268,8 +282,9 @@ Each `map` entry is one of two indication types:
 - `notes` — a list of `{pitch, seconds}`; pitch is `[A-G][b/#]?[0-8]` (e.g. `Eb3`, `G#3`).
 - `sound_file` — an absolute path (`~` is expanded); the file plays to completion, then the pause.
 
-`SUCCESS` and `ERROR` are built in, so they work even if you define a custom
-`map`; an entry of the same name overrides the built-in.
+`SUCCESS`, `ERROR`, `FAILURE`, `USER_PROMPT`, `INFO`, and `WARNING` are built
+in, so they work even if you define a custom `map`; an entry of the same name
+overrides the built-in.
 
 #### `auto_label` section
 

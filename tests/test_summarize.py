@@ -4,6 +4,7 @@
 from unittest.mock import patch, MagicMock
 
 from speeker.summarize import (
+    assess_and_summarize,
     clean_summary,
     fallback_summarize,
     get_backend_info,
@@ -516,3 +517,129 @@ class TestSummarizeForSpeechWithLLM:
         result = summarize_for_speech("Fixed the bug.")
         # Should use fallback, not crash
         assert isinstance(result, str)
+
+
+class TestAssessAndSummarize:
+    """Tests for assess_and_summarize: outcome classification + styled summary."""
+
+    # --- Heuristic fallback path (no LLM backend configured) ---
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_fallback_question_is_user_prompt(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")  # no backend
+        interp, summary = assess_and_summarize(
+            "I've drafted the migration. Should I drop the legacy column now?"
+        )
+        assert interp == "USER_PROMPT"
+        # The spoken summary should carry the actual question.
+        assert summary.strip().endswith("?")
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_fallback_decision_request_is_user_prompt(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")
+        interp, _ = assess_and_summarize(
+            "There are two ways to do this. Would you like me to use the cached path."
+        )
+        assert interp == "USER_PROMPT"
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_fallback_failure(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")
+        interp, _ = assess_and_summarize(
+            "I could not finish: the build failed with an unresolved import error."
+        )
+        assert interp == "FAILURE"
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_fallback_success(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")
+        interp, _ = assess_and_summarize(
+            "Done. I fixed the authentication bug and all tests pass."
+        )
+        assert interp == "SUCCESS"
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_fallback_neutral_returns_none(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")
+        interp, summary = assess_and_summarize(
+            "The authentication module lives in the services layer and uses tokens."
+        )
+        assert interp is None
+        assert isinstance(summary, str) and summary
+
+    @patch("speeker.summarize._get_llm_settings")
+    def test_question_wins_over_failure_words(self, mock_settings):
+        mock_settings.return_value = ("", "", "", "")
+        # Mentions an error but ends asking the user — the question should win.
+        interp, _ = assess_and_summarize(
+            "I hit an error in the parser. Do you want me to retry with the legacy flag?"
+        )
+        assert interp == "USER_PROMPT"
+
+    # --- LLM path ---
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_json_parsed(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = (
+            '{"category": "USER_PROMPT", '
+            '"summary": "I have a question about whether to delete the old records."}'
+        )
+        interp, summary = assess_and_summarize("...")
+        assert interp == "USER_PROMPT"
+        assert "question" in summary.lower()
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_neutral_maps_to_none(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = '{"category": "NEUTRAL", "summary": "Explained the layout."}'
+        interp, summary = assess_and_summarize("...")
+        assert interp is None
+        assert summary == "Explained the layout."
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_json_embedded_in_prose(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = (
+            'Sure! Here you go:\n'
+            '{"category": "SUCCESS", "summary": "Fixed the login bug."}\n'
+            'Hope that helps.'
+        )
+        interp, summary = assess_and_summarize("...")
+        assert interp == "SUCCESS"
+        assert summary == "Fixed the login bug."
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_unparseable_falls_back_to_heuristic(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = "no json here at all"
+        interp, _ = assess_and_summarize("Done. Fixed it and all tests pass.")
+        assert interp == "SUCCESS"  # heuristic took over
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_unknown_category_falls_back(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.return_value = '{"category": "BOGUS", "summary": "x"}'
+        interp, _ = assess_and_summarize(
+            "I could not finish: the build failed with an error."
+        )
+        assert interp == "FAILURE"  # heuristic took over
+
+    @patch("speeker.summarize.call_llm")
+    @patch("speeker.summarize._get_llm_settings")
+    def test_llm_exception_falls_back(self, mock_settings, mock_call):
+        mock_settings.return_value = ("ollama", "", "", "")
+        mock_call.side_effect = Exception("LLM down")
+        interp, summary = assess_and_summarize("Done. Fixed it and all tests pass.")
+        assert interp == "SUCCESS"
+        assert isinstance(summary, str) and summary
+
+    def test_empty_text_is_neutral(self):
+        interp, summary = assess_and_summarize("   ")
+        assert interp is None
+        assert isinstance(summary, str)

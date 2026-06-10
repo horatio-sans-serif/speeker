@@ -587,6 +587,106 @@ class TestSummarizeEndpoint:
         assert data["status"] == "error"
         assert "LLM error" in data["error"]
 
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    @patch("speeker.server.summarize_for_speech")
+    def test_summarize_without_assess_does_not_classify(
+        self, mock_summarize, mock_enqueue, mock_count, mock_player, client
+    ):
+        """assess defaults off: no interpretation is attached, behaviour unchanged."""
+        mock_summarize.return_value = "Fixed it."
+        mock_enqueue.return_value = 1
+        mock_count.return_value = 1
+        response = client.post("/summarize", json={"text": "Fixed the bug. Done."})
+        assert response.status_code == 200
+        assert response.json()["interpretation"] is None
+        meta = mock_enqueue.call_args[1]["metadata"] or {}
+        assert "interpretation" not in meta
+
+
+class TestSummarizeAssess:
+    """Tests for /summarize?assess: outcome classification attaches a cue."""
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    @patch("speeker.server.assess_and_summarize")
+    def test_assess_attaches_interpretation(
+        self, mock_assess, mock_enqueue, mock_count, mock_player, client
+    ):
+        mock_assess.return_value = ("SUCCESS", "Fixed the login bug.")
+        mock_enqueue.return_value = 7
+        mock_count.return_value = 1
+        response = client.post(
+            "/summarize", json={"text": "long text", "assess": True}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["interpretation"] == "SUCCESS"
+        assert data["summary"] == "Fixed the login bug."
+        assert mock_enqueue.call_args[1]["metadata"]["interpretation"] == "SUCCESS"
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    @patch("speeker.server.assess_and_summarize")
+    def test_assess_neutral_attaches_no_cue(
+        self, mock_assess, mock_enqueue, mock_count, mock_player, client
+    ):
+        mock_assess.return_value = (None, "Explained the layout.")
+        mock_enqueue.return_value = 1
+        mock_count.return_value = 1
+        response = client.post(
+            "/summarize", json={"text": "long text", "assess": True}
+        )
+        assert response.status_code == 200
+        assert response.json()["interpretation"] is None
+        meta = mock_enqueue.call_args[1]["metadata"] or {}
+        assert "interpretation" not in meta
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    @patch("speeker.server.assess_and_summarize")
+    @patch("speeker.server.summarize_for_speech")
+    def test_assess_bypasses_plain_summarize(
+        self, mock_plain, mock_assess, mock_enqueue, mock_count, mock_player, client
+    ):
+        """When assessing, the plain summarizer is not also invoked."""
+        mock_assess.return_value = ("FAILURE", "The build failed.")
+        mock_enqueue.return_value = 1
+        mock_count.return_value = 1
+        response = client.post(
+            "/summarize", json={"text": "long text", "assess": True}
+        )
+        assert response.status_code == 200
+        mock_plain.assert_not_called()
+        mock_assess.assert_called_once()
+
+    @patch("speeker.server.start_player")
+    @patch("speeker.server.get_pending_count")
+    @patch("speeker.server.enqueue")
+    @patch("speeker.server.assess_and_summarize")
+    def test_assess_user_prompt_with_title(
+        self, mock_assess, mock_enqueue, mock_count, mock_player, client
+    ):
+        """USER_PROMPT keeps the project title prefix so the cue strips cleanly."""
+        mock_assess.return_value = (
+            "USER_PROMPT",
+            "I have a question about whether to delete the old records.",
+        )
+        mock_enqueue.return_value = 1
+        mock_count.return_value = 1
+        response = client.post(
+            "/summarize?title=Foo", json={"text": "long text", "assess": True}
+        )
+        assert response.status_code == 200
+        enqueued_text = mock_enqueue.call_args[0][0]
+        assert "$Eb4 project Foo." in enqueued_text
+        assert "I have a question" in enqueued_text
+        assert mock_enqueue.call_args[1]["metadata"]["interpretation"] == "USER_PROMPT"
+
 
 class TestSsmlAndPolly:
     def test_speak_ssml_body_flag_stored_in_metadata(self, tmp_path):

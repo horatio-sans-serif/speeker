@@ -35,6 +35,29 @@ BUILTIN_INTERPRETATIONS: dict[str, dict] = {
             {"pitch": "Bb2", "seconds": 0.2},
         ],
     },
+    # FAILURE is the outcome-named twin of ERROR: callers that classify a turn
+    # as a failure (vs. a low-level error) get the same recognizable "something
+    # went wrong" descent, so listeners learn one bad-news sound.
+    "FAILURE": {
+        "type": "notes",
+        "notes": [
+            {"pitch": "Eb4", "seconds": 0.3},
+            {"pitch": "D4", "seconds": 0.2},
+            {"pitch": "Bb2", "seconds": 0.2},
+            {"pitch": "Bb2", "seconds": 0.2},
+        ],
+    },
+    # USER_PROMPT signals "the agent paused to ask *you* something." A rising
+    # two-note "ding-dong?" reads as inquisitive -- the upward interval is the
+    # auditory shape of a spoken question, distinct from the SUCCESS/FAILURE
+    # cues so a waiting prompt is unmistakable across the room.
+    "USER_PROMPT": {
+        "type": "notes",
+        "notes": [
+            {"pitch": "Bb3", "seconds": 0.18},
+            {"pitch": "Eb4", "seconds": 0.5},
+        ],
+    },
     # Airline-PA-style attention cues. INFO is the single chime ("...this is
     # your captain"); WARNING is the two-tone "attention" signal (same note
     # twice -- the synth re-articulates repeated notes with a short gap).

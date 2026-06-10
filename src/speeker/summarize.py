@@ -93,6 +93,184 @@ def summarize_for_speech(text: str, max_words: int = 30) -> str:
     return fallback_summarize(text, max_words)
 
 
+# Categories the assessor may assign. NEUTRAL means "no outcome cue" and is
+# surfaced to callers as ``None`` -- a normal turn that is neither a clear
+# success/failure nor a question gets no chime (matches the hook's "else, do
+# not set an interpretation" rule).
+ASSESS_CATEGORIES = ("SUCCESS", "FAILURE", "USER_PROMPT", "NEUTRAL")
+
+ASSESS_PROMPT = """You are labeling an AI assistant's FINAL message to its user, then summarizing it for hands-free listening.
+
+Choose exactly one category:
+- USER_PROMPT: the message ends by asking the user a question, or asks for a decision, confirmation, or clarification it needs before it can continue.
+- SUCCESS: the message reports that the requested work was completed successfully.
+- FAILURE: the message reports that the work failed, errored, was blocked, or could not be completed.
+- NEUTRAL: anything else (status, partial progress, an explanation, an answer to a question) with no clear success, failure, or question to the user.
+
+Then write a summary:
+- One or two complete sentences, about 30 words, natural spoken English, no file paths, URLs, or code.
+- For SUCCESS, FAILURE, or NEUTRAL: start with a past-tense verb describing the outcome (Fixed, Added, Failed, Explained, ...).
+- For USER_PROMPT: phrase it as a question to the listener, e.g. "I have a question about whether to delete the old records."
+
+Respond with ONLY a JSON object and nothing else:
+{{"category": "<one of SUCCESS, FAILURE, USER_PROMPT, NEUTRAL>", "summary": "<the summary>"}}
+
+Message:
+{text}
+
+JSON:"""
+
+# Last-line / decision-request signals for the no-LLM heuristic. A question
+# aimed at the user almost always lands at the very end of the turn, so the
+# heuristic inspects the tail rather than the whole message.
+_USER_PROMPT_PHRASES = re.compile(
+    r"\b(would you like|do you want|should i|shall i|which (?:one|option|approach|of)|"
+    r"could you (?:confirm|clarify|let me know)|can you (?:confirm|clarify)|"
+    r"please (?:confirm|clarify|advise|let me know)|let me know|"
+    r"do you have a preference|what would you|how would you|"
+    r"want me to|like me to)\b",
+    re.IGNORECASE,
+)
+# Deliberately strict: only constructions that narrate the *turn* failing, not
+# any mention of the word "error"/"fail" (which appears just as often in
+# success reports like "fixed the failing test"). The LLM path is authoritative;
+# this only has to catch explicit failure narration when no LLM is configured.
+_FAILURE_PHRASES = re.compile(
+    r"\b(could not|could ?n'?t|cannot|can ?not|can'?t|unable to|"
+    r"failed(?: to| with)?|failing (?:with|to|on)|"
+    r"did ?n'?t work|does ?n'?t work|wo ?n'?t work|"
+    r"blocked|aborted|gave up|ran into (?:an? )?(?:error|problem|issue)|"
+    r"hit (?:an? )?(?:error|problem|issue))\b",
+    re.IGNORECASE,
+)
+_SUCCESS_PHRASES = re.compile(
+    r"\b(done|completed?|finished|fixed|resolved|implemented|deployed|"
+    r"all tests pass(?:ed|ing)?|tests? (?:now )?pass|succeed(?:ed)?|success|"
+    r"is now working|works now|ready to go|merged|shipped)\b",
+    re.IGNORECASE,
+)
+
+
+def _message_tail(text: str, chars: int = 400) -> str:
+    """Last paragraph (or trailing ``chars``) -- where a question to the user lands."""
+    stripped = text.strip()
+    # Prefer the final non-empty paragraph; fall back to a raw character tail.
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", stripped) if p.strip()]
+    tail = paragraphs[-1] if paragraphs else stripped
+    return tail[-chars:]
+
+
+def _last_question_sentence(text: str) -> str | None:
+    """The final sentence ending in '?', cleaned for speech, or None."""
+    questions = re.findall(r"[^.!?\n]*\?", text)
+    for q in reversed(questions):
+        q = q.strip().lstrip("-•* ").strip()
+        if len(q) >= 8:
+            return q
+    return None
+
+
+def _last_prompt_sentence(text: str) -> str | None:
+    """Final sentence that *reads* as a request to the user, even without a '?'.
+
+    Catches statement-form asks ("Would you like me to use the cached path.")
+    so the spoken summary can be the actual request rather than a generic
+    "I have a question for you." Inspects the tail where such asks land.
+    """
+    tail = _message_tail(text)
+    sentences = re.split(r"(?<=[.!?])\s+", tail)
+    for sentence in reversed(sentences):
+        s = sentence.strip().lstrip("-•* ").strip()
+        if len(s) >= 8 and _USER_PROMPT_PHRASES.search(s):
+            return s
+    return None
+
+
+def _heuristic_category(text: str) -> str | None:
+    """Classify without an LLM. Returns a category name or None for neutral.
+
+    Order matters: a turn that mentions an error but ends by asking the user a
+    question is a USER_PROMPT, not a FAILURE -- the question is the actionable
+    part, so it wins.
+    """
+    tail = _message_tail(text)
+    if tail.rstrip().endswith("?") or _USER_PROMPT_PHRASES.search(tail):
+        return "USER_PROMPT"
+    if _FAILURE_PHRASES.search(tail) or _FAILURE_PHRASES.search(text[-800:]):
+        return "FAILURE"
+    if _SUCCESS_PHRASES.search(tail) or _SUCCESS_PHRASES.search(text[:200]):
+        return "SUCCESS"
+    return None
+
+
+def _heuristic_assess(text: str, max_words: int) -> tuple[str | None, str]:
+    """No-LLM assessment: category + a style-appropriate spoken summary."""
+    category = _heuristic_category(text)
+    if category == "USER_PROMPT":
+        question = _last_question_sentence(text) or _last_prompt_sentence(text)
+        summary = question or "I have a question for you."
+        # Keep the spoken question within the word budget.
+        words = summary.split()
+        if len(words) > max_words:
+            summary = " ".join(words[:max_words]).rstrip(" ,;:") + "?"
+        return "USER_PROMPT", summary
+    return category, fallback_summarize(text, max_words)
+
+
+def _parse_assessment(raw: str) -> tuple[str | None, str] | None:
+    """Parse the LLM's JSON object into (category-or-None, summary).
+
+    Returns None if no valid object with a known category is found, so the
+    caller can fall back to the heuristic. NEUTRAL maps to a None category.
+    """
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not match:
+        return None
+    try:
+        obj = json.loads(match.group(0))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    category = str(obj.get("category", "")).strip().upper()
+    summary = str(obj.get("summary", "")).strip()
+    if category not in ASSESS_CATEGORIES or not summary:
+        return None
+    return (None if category == "NEUTRAL" else category), summary
+
+
+def assess_and_summarize(text: str, max_words: int = 30) -> tuple[str | None, str]:
+    """Classify a turn's outcome and produce a style-matched spoken summary.
+
+    Returns ``(interpretation, summary)`` where ``interpretation`` is one of
+    ``"SUCCESS"``, ``"FAILURE"``, ``"USER_PROMPT"``, or ``None`` (a neutral
+    turn that warrants no outcome cue). USER_PROMPT summaries are phrased as a
+    question to the listener.
+
+    A single LLM call does both jobs when a backend is configured; otherwise a
+    conservative keyword heuristic classifies and the existing extractive
+    summarizer supplies the text. The heuristic is also the fallback whenever
+    the LLM output can't be parsed into a known category.
+    """
+    if not text or not text.strip():
+        return None, "Task completed"
+
+    if len(text) > 4000:
+        text = text[:4000] + "..."
+
+    llm_backend, _, _, _ = _get_llm_settings()
+    if llm_backend:
+        try:
+            response = call_llm(ASSESS_PROMPT.format(text=text))
+            if response:
+                parsed = _parse_assessment(response)
+                if parsed is not None:
+                    category, summary = parsed
+                    return category, clean_summary(summary, max_words) or summary
+        except Exception as e:
+            print(f"LLM assessment error: {e}", flush=True)
+
+    return _heuristic_assess(text, max_words)
+
+
 def call_llm(prompt: str, max_tokens: int = 100) -> str | None:
     """Call the configured LLM backend. *max_tokens* defaults to 100 for
     short-summary callers; longer-form callers (e.g. SSML generation

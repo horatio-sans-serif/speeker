@@ -50,6 +50,27 @@ class TestBuiltins:
         assert "WARNING" in names
         assert [n["pitch"] for n in ind["notes"]] == ["Eb4", "Eb4"]
 
+    def test_failure_is_present_and_notes(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            ind = resolve_interpretation("FAILURE")
+            names = interpretation_names()
+        assert "FAILURE" in names
+        assert ind["type"] == "notes"
+        # Shares the descending "something went wrong" shape of ERROR.
+        assert notes_to_spec(ind) == notes_to_spec(resolve_interpretation("ERROR"))
+
+    def test_user_prompt_is_present_and_rises(self, tmp_path):
+        with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
+            ind = resolve_interpretation("USER_PROMPT")
+            names = interpretation_names()
+        assert "USER_PROMPT" in names
+        assert ind["type"] == "notes"
+        spec = notes_to_spec(ind)
+        # An inquisitive "ding-dong?" cue: the last note sits above the first.
+        first_note, first_octave, _ = spec[0]
+        last_note, last_octave, _ = spec[-1]
+        assert (last_octave, last_note) > (first_octave, first_note)
+
 
 class TestResolve:
     def test_unknown_returns_none(self, tmp_path):

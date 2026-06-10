@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from .queue_db import enqueue, get_pending_count
 from .cli import start_player
-from .summarize import summarize_for_speech, get_backend_info
+from .summarize import summarize_for_speech, assess_and_summarize, get_backend_info
 from .web import router as web_router
 from .voices import (
     POCKET_TTS_VOICES,
@@ -93,12 +93,19 @@ class SpeakResponse(BaseModel):
 class SummarizeRequest(BaseModel):
     text: str
     metadata: dict | None = None
+    # When True, classify the turn's outcome (SUCCESS / FAILURE / USER_PROMPT /
+    # neutral) and attach the matching interpretation cue, styling the summary
+    # to the outcome (a USER_PROMPT is phrased as a question). Off by default so
+    # plain /summarize callers are unaffected.
+    assess: bool = False
     session_id: str | None = None  # Deprecated
 
 
 class SummarizeResponse(BaseModel):
     status: str
     summary: str | None = None
+    # The interpretation chosen by assess mode, or None (no cue / assess off).
+    interpretation: str | None = None
     queue_id: int | None = None
     original_length: int | None = None
     summary_length: int | None = None
@@ -255,11 +262,22 @@ async def summarize_and_speak(body: SummarizeRequest, request: Request):
         if body.session_id and "queue" not in metadata:
             metadata["queue"] = body.session_id
 
-        # Generate summary
-        summary = summarize_for_speech(text)
+        # Generate summary -- assess mode classifies the outcome and styles the
+        # summary in one pass; plain mode keeps the original accomplishment
+        # framing. A neutral assessment leaves the interpretation unset so no
+        # outcome cue plays.
+        interpretation: str | None = None
+        if body.assess:
+            interpretation, summary = assess_and_summarize(text)
+            if interpretation:
+                metadata["interpretation"] = interpretation
+        else:
+            summary = summarize_for_speech(text)
         summary = elide_message_count(summary)
 
-        # Apply title prefix if provided
+        # Apply title prefix if provided. The player strips this leading tone
+        # when an interpretation cue is present, so the project name is still
+        # spoken but only the outcome cue is heard (see player.py).
         title = extract_title(request)
         spoken_text = format_with_title(summary, title)
 
@@ -272,6 +290,7 @@ async def summarize_and_speak(body: SummarizeRequest, request: Request):
         return SummarizeResponse(
             status="success",
             summary=summary,
+            interpretation=interpretation,
             queue_id=queue_id,
             original_length=len(text),
             summary_length=len(summary),
