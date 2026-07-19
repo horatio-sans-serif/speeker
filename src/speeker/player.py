@@ -1101,6 +1101,15 @@ def process_queue(verbose: bool = False) -> int:
             )
             if current_item_id is not None:
                 set_currently_playing(current_item_id)
+
+            # Background music: switch the bed to this (queue, interpretation)'s
+            # track (crossfades only on change) and duck it under the speech.
+            music = _get_music_engine()
+            if music.available():
+                from .music import resolve_music_track
+                music.set_track(resolve_music_track(session_id, line_interpretation))
+                music.duck(True)
+
             tts_error: TTSError | None = None
             try:
                 result = speak_text(
@@ -1118,6 +1127,8 @@ def process_queue(verbose: bool = False) -> int:
             finally:
                 if current_item_id is not None:
                     clear_currently_playing()
+                if music.available():
+                    music.duck(False)
 
             if tts_error is not None and 0 <= item_idx < len(items):
                 # Failure path: increment attempt counter in metadata. If
@@ -1207,6 +1218,9 @@ def process_queue(verbose: bool = False) -> int:
         # decide whether to auto-label based on its own gap+context-switch
         # signals.
         set_last_utterance_time(queue_id=last_played_queue)
+
+    # Fade the background-music bed out at the end of the batch.
+    _get_music_engine().stop(fade=True)
 
     return total_played
 
@@ -1335,7 +1349,21 @@ def run_daemon(verbose: bool = False) -> None:
 
             time.sleep(POLL_INTERVAL)
     finally:
+        if _music_engine is not None:
+            _music_engine.shutdown()
         release_lock(lock_path)
+
+
+_music_engine = None
+
+
+def _get_music_engine():
+    """Lazily create the per-daemon background-music engine singleton."""
+    global _music_engine
+    if _music_engine is None:
+        from .music_engine import MusicEngine
+        _music_engine = MusicEngine()
+    return _music_engine
 
 
 def _drain_pending() -> None:

@@ -160,6 +160,33 @@ class TestApiEnginesCustomVoices:
             assert "elevenlabs" not in names
 
 
+class TestStripAutoLabelPrefix:
+    """Generate-route stripping of speeker's own 'project <queue>.' auto-label."""
+
+    def _strip(self, t):
+        from speeker.web import strip_auto_label_prefix
+        return strip_auto_label_prefix(t)
+
+    def test_strips_plain_prefix(self):
+        assert self._strip("project default. Hello there.") == "Hello there."
+
+    def test_strips_with_tone_token(self):
+        assert self._strip("$Eb4 project demo. Build passed.") == "Build passed."
+
+    def test_strips_from_when_variant(self):
+        assert self._strip("project alpha. From 2 hours ago: A late note.") == "A late note."
+
+    def test_leaves_capitalized_project_alone(self):
+        # Human-typed "Project ..." (capital P) is real content, not the label.
+        assert self._strip("Project Apollo. It launched in 1969.") == "Project Apollo. It launched in 1969."
+
+    def test_leaves_unrelated_text(self):
+        assert self._strip("Hello world.") == "Hello world."
+
+    def test_only_strips_leading(self):
+        assert self._strip("Note: project default. is mid-sentence.") == "Note: project default. is mid-sentence."
+
+
 class TestStripToneTokens:
     """Tests for strip_tone_tokens (display-time elision of $Note tones)."""
 

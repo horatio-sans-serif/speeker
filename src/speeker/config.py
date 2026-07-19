@@ -105,6 +105,27 @@ DEFAULT_CONFIG = {
         # boomy reverb on speech but dry pings on cues.
         "apply_effects": True,
     },
+    "music": {
+        # Background music bed that ducks under speech. Off by default.
+        # Requires mpv (brew install mpv); a silent no-op without it.
+        "enabled": False,
+        "volume": 0.6,        # base music level, 0..1
+        "duck_level": 0.4,    # music level while TTS speaks, 0..1 (stays audible)
+        "fade_ms": 400,       # duck / fade-in / fade-out ramp
+        "crossfade_ms": 600,  # crossfade between tracks on change
+    },
+    "music_rules": [
+        # Per-(queue, interpretation) track selection, resolved like
+        # ``tone_rules`` (queue match +2, interpretation +1; most specific
+        # wins; no match -> no music). Each rule:
+        #   {
+        #     "queue": "<queue id or regex>" | null,
+        #     "queue_regex": bool,
+        #     "interpretation": "SUCCESS" | null,
+        #     "track": "/abs/path/to/track.mp3",
+        #   }
+        # See music.resolve_music_track().
+    ],
     "tone_rules": [
         # Per-queue / per-interpretation tune overrides. Each rule is:
         #   {
@@ -344,6 +365,19 @@ def get_effects_config() -> dict:
     """Get the audio-effects configuration (preset name + future params)."""
     config = get_config()
     return config.get("effects", {})
+
+
+def get_music_config() -> dict:
+    """Get background-music configuration (enable, levels, fades)."""
+    config = get_config()
+    return config.get("music", {})
+
+
+def get_music_rules() -> list[dict]:
+    """Get per-(queue, interpretation) music track rules (empty when none)."""
+    config = get_config()
+    rules = config.get("music_rules", [])
+    return rules if isinstance(rules, list) else []
 
 
 def get_tone_rules() -> list[dict]:

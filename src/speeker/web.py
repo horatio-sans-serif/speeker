@@ -50,6 +50,24 @@ def strip_tone_tokens(text: str) -> str:
     """Remove $Note tone markers so they aren't shown in the queue history."""
     return _TONE_TOKEN_RE.sub("", text or "").strip()
 
+
+# The daemon's auto-label prefix: optional leading $Note tone token(s), then the
+# lowercase literal "project <title>. " (optionally followed by "from <when>: ").
+# Matched case-sensitively on lowercase "project"/"from" so a human typing
+# "Project Apollo. ..." (capitalized, or mid-sentence) is never touched -- only
+# speeker's own auto-label shape is stripped. Used to keep ad-hoc Generate from
+# re-speaking the project label when a copied history card is pasted in.
+_AUTO_LABEL_RE = re.compile(
+    r"^\s*(?:\$[A-Ga-g][b#]?[0-8](?::[0-9]*\.?[0-9]+)?\s+)*"
+    r"project\s+[^.]+\.\s+"
+    r"(?:[Ff]rom\s+[^:]+:\s+)?"
+)
+
+
+def strip_auto_label_prefix(text: str) -> str:
+    """Drop a leading speeker auto-label ("[$Eb4] project <queue>. ...") prefix."""
+    return _AUTO_LABEL_RE.sub("", text or "", count=1).strip()
+
 # React-based single-page UI. Loaded once; the app fetches data via the
 # /api/* endpoints. We use Babel-standalone to compile JSX in-browser so the
 # whole thing ships in one Python module with no Node build step
@@ -2697,6 +2715,11 @@ function SettingsView() {
             subtitle: 'Tone cues played before a message (SUCCESS, ERROR, INFO, WARNING, custom).',
             body: <InterpretationsSection />,
         },
+        music: {
+            title: 'Background music',
+            subtitle: 'A music bed per queue/interpretation that ducks under speech (needs mpv).',
+            body: <MusicSection />,
+        },
         effects: {
             title: 'Audio effects',
             subtitle: 'Reverb, compression, EQ on TTS speech. Tones are unaffected.',
@@ -2735,6 +2758,7 @@ const SETTINGS_SECTIONS = [
     { id: 'pronunciation', title: 'Pronunciation' },
     { id: 'tones',         title: 'Tones' },
     { id: 'interpretations', title: 'Interpretations' },
+    { id: 'music',         title: 'Music' },
     { id: 'effects',       title: 'Effects' },
     { id: 'ssml',          title: 'SSML' },
     { id: 'per-queue',     title: 'Per-queue' },
@@ -3151,6 +3175,131 @@ function InterpretationsSection() {
             </table>
             <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
                 <button className="btn subtle" onClick={addCue}>+ Add cue</button>
+                <span className="save-success">{status}</span>
+            </div>
+        </>
+    );
+}
+
+// ----- Background music editor: global on/off + levels, and a table of
+// per-(queue, interpretation) track rules (resolved like tone rules). Music
+// ducks under speech; needs mpv installed.
+function MusicSection() {
+    const [cfg, setCfg] = useState(null);
+    const [rules, setRules] = useState([]);
+    const [interps, setInterps] = useState([]);
+    const [status, setStatus] = useState('');
+
+    useEffect(() => {
+        fetch('/api/music').then(r => r.json()).then(setCfg).catch(() => {});
+        fetch('/api/music-rules').then(r => r.json())
+            .then(d => setRules((d.rules || []).map(r => ({ ...r })))).catch(() => {});
+        fetch('/api/interpretations').then(r => r.json())
+            .then(d => setInterps(d.interpretations || [])).catch(() => {});
+    }, []);
+
+    const saveCfg = async (patch) => {
+        setCfg(c => ({ ...c, ...patch }));
+        try {
+            await fetch('/api/music', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(patch),
+            });
+        } catch (e) {}
+    };
+    const setRule = (i, k, v) => setRules(p => p.map((r, j) => j === i ? { ...r, [k]: v } : r));
+    const addRule = () => setRules(p => [...p, { queue: '', queue_regex: false, interpretation: '', track: '' }]);
+    const removeRule = (i) => setRules(p => p.filter((_, j) => j !== i));
+    const saveRules = async () => {
+        try {
+            const resp = await fetch('/api/music-rules', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ rules }),
+            });
+            const d = await resp.json();
+            setRules((d.rules || []).map(r => ({ ...r })));
+            setStatus(d.message || 'Saved.'); setTimeout(() => setStatus(''), 3000);
+        } catch (e) { setStatus('Save failed'); }
+    };
+
+    if (!cfg) return <div>Loading...</div>;
+    const pct = (v) => Math.round((v || 0) * 100) + '%';
+    return (
+        <>
+            {!cfg.mpv_installed && (
+                <div className="restart-banner">Background music needs <code>mpv</code> (brew install mpv).</div>
+            )}
+            <div className="field-row">
+                <label>Enabled</label>
+                <label className="ios-switch">
+                    <input type="checkbox" checked={!!cfg.enabled}
+                        onChange={e => saveCfg({ enabled: e.target.checked })} />
+                    <span className="slider"></span>
+                </label>
+            </div>
+            <div className="field-row">
+                <label>Music volume</label>
+                <input type="range" min="0" max="1" step="0.05" value={cfg.volume}
+                    onChange={e => saveCfg({ volume: parseFloat(e.target.value) })} />
+                <span style={{ marginLeft: 8, opacity: 0.7 }}>{pct(cfg.volume)}</span>
+            </div>
+            <div className="field-row">
+                <label>Duck level (under speech)</label>
+                <input type="range" min="0" max="1" step="0.05" value={cfg.duck_level}
+                    onChange={e => saveCfg({ duck_level: parseFloat(e.target.value) })} />
+                <span style={{ marginLeft: 8, opacity: 0.7 }}>{pct(cfg.duck_level)}</span>
+            </div>
+            <div className="field-row">
+                <label>Fade (ms)</label>
+                <input type="number" min="0" step="50" value={cfg.fade_ms}
+                    onChange={e => saveCfg({ fade_ms: parseInt(e.target.value) || 0 })} />
+            </div>
+            <div className="field-row">
+                <label>Crossfade (ms)</label>
+                <input type="number" min="0" step="50" value={cfg.crossfade_ms}
+                    onChange={e => saveCfg({ crossfade_ms: parseInt(e.target.value) || 0 })} />
+            </div>
+            <h3 style={{ margin: '18px 0 6px', fontSize: '1.05em' }}>Tracks by queue / interpretation</h3>
+            <table className="pronunciation-table">
+                <thead>
+                    <tr>
+                        <th>Queue</th>
+                        <th style={{ width: 56 }}>regex</th>
+                        <th style={{ width: '20%' }}>Interpretation</th>
+                        <th>Track path</th>
+                        <th style={{ width: 80 }}></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {rules.map((r, i) => (
+                        <tr key={i}>
+                            <td><input value={r.queue || ''} placeholder="(any)"
+                                onChange={e => setRule(i, 'queue', e.target.value)} /></td>
+                            <td style={{ textAlign: 'center' }}>
+                                <input type="checkbox" checked={!!r.queue_regex}
+                                    onChange={e => setRule(i, 'queue_regex', e.target.checked)} /></td>
+                            <td>
+                                <select value={r.interpretation || ''}
+                                    onChange={e => setRule(i, 'interpretation', e.target.value)}>
+                                    <option value="">(any)</option>
+                                    {interps.map(n => <option key={n} value={n}>{n}</option>)}
+                                </select>
+                            </td>
+                            <td><input value={r.track || ''} placeholder="/path/to/track.mp3"
+                                onChange={e => setRule(i, 'track', e.target.value)} /></td>
+                            <td><button className="btn subtle" onClick={() => removeRule(i)}>Remove</button></td>
+                        </tr>
+                    ))}
+                    {rules.length === 0 && (
+                        <tr><td colSpan={5} style={{ color: 'rgba(255,255,255,0.4)', padding: 12 }}>
+                            No rules. Music plays only where a rule matches the queue / interpretation.
+                        </td></tr>
+                    )}
+                </tbody>
+            </table>
+            <div style={{ display: 'flex', gap: 8, marginTop: 12, alignItems: 'center' }}>
+                <button className="btn subtle" onClick={addRule}>+ Add rule</button>
+                <button className="btn" onClick={saveRules}>Save rules</button>
                 <span className="save-success">{status}</span>
             </div>
         </>
@@ -4917,7 +5066,9 @@ async def api_generate(body: GenerateRequest):
     from .player import generate_tts, get_audio_save_path
     from .queue_db import enqueue, get_connection, get_settings
 
-    text = (body.text or "").strip()
+    # Ad-hoc Generate speaks exactly what's typed -- never speeker's own
+    # "project <queue>." auto-label (e.g. when a copied history card is pasted).
+    text = strip_auto_label_prefix((body.text or "").strip())
     if not text:
         raise HTTPException(status_code=400, detail="text cannot be empty")
     if len(text) > 50000:
@@ -5912,6 +6063,87 @@ async def api_put_focus(body: FocusUpdate):
         "pause_when_active": bool(body.pause_when_active),
         "status": focus_status(),
     })
+
+
+@router.get("/api/music")
+async def api_get_music():
+    """Background-music settings + whether mpv is installed."""
+    import shutil
+    from .config import get_music_config
+    cfg = get_music_config()
+    return JSONResponse({
+        "enabled": bool(cfg.get("enabled")),
+        "volume": float(cfg.get("volume", 0.6)),
+        "duck_level": float(cfg.get("duck_level", 0.2)),
+        "fade_ms": int(cfg.get("fade_ms", 400)),
+        "crossfade_ms": int(cfg.get("crossfade_ms", 600)),
+        "mpv_installed": shutil.which("mpv") is not None,
+    })
+
+
+class MusicUpdate(BaseModel):
+    enabled: bool | None = None
+    volume: float | None = None
+    duck_level: float | None = None
+    fade_ms: int | None = None
+    crossfade_ms: int | None = None
+
+
+@router.put("/api/music")
+async def api_put_music(body: MusicUpdate):
+    """Persist background-music settings (read live; no daemon restart)."""
+    cfg = get_config()
+    music = cfg.setdefault("music", {})
+    if body.enabled is not None:
+        music["enabled"] = bool(body.enabled)
+    if body.volume is not None:
+        music["volume"] = max(0.0, min(1.0, float(body.volume)))
+    if body.duck_level is not None:
+        music["duck_level"] = max(0.0, min(1.0, float(body.duck_level)))
+    if body.fade_ms is not None:
+        music["fade_ms"] = max(0, int(body.fade_ms))
+    if body.crossfade_ms is not None:
+        music["crossfade_ms"] = max(0, int(body.crossfade_ms))
+    save_config(cfg)
+    return JSONResponse({"music": music, "message": "Saved. Takes effect on the next message."})
+
+
+@router.get("/api/music-rules")
+async def api_get_music_rules():
+    """Per-(queue, interpretation) music track rules."""
+    from .config import get_music_rules
+    return JSONResponse({"rules": get_music_rules()})
+
+
+class MusicRule(BaseModel):
+    queue: str | None = None
+    queue_regex: bool = False
+    interpretation: str | None = None
+    track: str
+
+
+class MusicRulesUpdate(BaseModel):
+    rules: list[MusicRule]
+
+
+@router.put("/api/music-rules")
+async def api_put_music_rules(body: MusicRulesUpdate):
+    """Replace the music rules list. Rows without a track are dropped."""
+    cleaned = []
+    for r in body.rules:
+        track = (r.track or "").strip()
+        if not track:
+            continue
+        rule = {"track": track, "queue_regex": bool(r.queue_regex)}
+        if r.queue and r.queue.strip():
+            rule["queue"] = r.queue.strip()
+        if r.interpretation and r.interpretation.strip():
+            rule["interpretation"] = r.interpretation.strip()
+        cleaned.append(rule)
+    cfg = get_config()
+    cfg["music_rules"] = cleaned
+    save_config(cfg)
+    return JSONResponse({"rules": cleaned, "message": "Saved. Takes effect on the next message."})
 
 
 @router.get("/api/queues")

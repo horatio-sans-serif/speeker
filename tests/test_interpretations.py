@@ -53,11 +53,14 @@ class TestBuiltins:
     def test_failure_is_present_and_notes(self, tmp_path):
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):
             ind = resolve_interpretation("FAILURE")
+            # Resolve ERROR inside the isolated config too, so the comparison
+            # is against the built-in default (not a user's customized ERROR).
+            error_spec = notes_to_spec(resolve_interpretation("ERROR"))
             names = interpretation_names()
         assert "FAILURE" in names
         assert ind["type"] == "notes"
         # Shares the descending "something went wrong" shape of ERROR.
-        assert notes_to_spec(ind) == notes_to_spec(resolve_interpretation("ERROR"))
+        assert notes_to_spec(ind) == error_spec
 
     def test_user_prompt_is_present_and_rises(self, tmp_path):
         with patch.dict(os.environ, {"SPEEKER_DIR": str(tmp_path)}):

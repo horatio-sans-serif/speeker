@@ -17,6 +17,7 @@ A text-to-speech system with HTTP API, web UI, and CLI. Queue text for playback 
 - **Metadata**: Attach arbitrary key-value data to messages
 - **Search**: Fuzzy text search or semantic search with embeddings
 - **Per-session settings**: Speed, voice, intro/outro sounds
+- **Background music**: A music bed per (queue, interpretation) that ducks under speech (needs `mpv`)
 
 ## Installation
 
@@ -199,6 +200,39 @@ about whether to delete the old records."). A neutral turn gets no cue. The
 chosen interpretation is returned in the `interpretation` field. The Claude Code
 Stop hook (`summarize-response.py`) uses this so each finished turn is announced
 with how it went. Falls back to a keyword heuristic when no LLM is configured.
+
+## Background music & ducking
+
+An optional ambient music bed plays under speech and **ducks** (drops in volume)
+while a message is actually being spoken, then returns. The track is chosen per
+**(queue, interpretation)** using the same most-specific-wins scoring as tone
+rules — e.g. a calm bed under `SUCCESS`, a tense one under `ERROR`. Off by
+default; requires `mpv` (`brew install mpv`) and is a silent no-op without it.
+
+How it behaves:
+
+- The bed is resolved **per message**. It loops under that message (ducked),
+  **crossfades** when the next message resolves to a different track, and fades
+  out at the end of the batch.
+- Ducking is a **gate**: music dips to `duck_level` while TTS speaks and ramps
+  back when it stops (smooth, `fade_ms`). Music runs in `mpv`; TTS still plays
+  via the normal path and the OS mixes the two.
+
+Configure in **Settings → Music** (enable, volume, duck level, fade/crossfade
+times) and add rules in the table (queue / interpretation / track path). Or in
+`config.json`:
+
+```jsonc
+"music": { "enabled": true, "volume": 0.6, "duck_level": 0.4, "fade_ms": 400, "crossfade_ms": 600 },
+"music_rules": [
+  { "queue": "deploy", "interpretation": "SUCCESS", "track": "~/Music/calm.mp3" },
+  { "queue": "deploy", "interpretation": "ERROR",   "track": "~/Music/tense.mp3" }
+]
+```
+
+A rule with no `queue`/`interpretation` matches anything (a default bed); a
+missing track file is treated as no match. API: `GET/PUT /api/music` and
+`GET/PUT /api/music-rules`.
 
 ## Configuration
 
